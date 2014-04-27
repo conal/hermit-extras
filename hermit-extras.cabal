@@ -1,9 +1,9 @@
 Name:               hermit-extras
 Version:            0.1
 Cabal-Version:      >= 1.6
-Synopsis:           Some definitions useful with HERMIT
+Synopsis:           Some helpers for GHC Core and HERMIT
 Category:           Language
-Description:        Some definitions useful with HERMIT
+Description:        Some helpers for GHC Core and HERMIT
 Author:             Conal Elliott
 Maintainer:         conal@conal.net
 Homepage:           http://github.com/conal/hermit-extras
