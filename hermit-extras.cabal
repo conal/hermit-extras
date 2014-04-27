@@ -1,0 +1,29 @@
+Name:               hermit-extras
+Version:            0.1
+Cabal-Version:      >= 1.6
+Synopsis:           Some definitions useful with HERMIT
+Category:           Language
+Description:        Some definitions useful with HERMIT
+Author:             Conal Elliott
+Maintainer:         conal@conal.net
+License:            BSD3
+License-File:       COPYING
+Stability:          experimental
+build-type:         Simple
+
+source-repository head
+  type:             git
+  location:         git://github.com/conal/hermit-extras
+
+Library
+  hs-Source-Dirs:   src
+  Build-Depends:    base < 5
+                  , ghc >= 7.6
+                  , transformers
+                  , kure   >= 2.16.0
+                  , hermit >= 0.4.0.0
+  Exposed-Modules:
+                    HERMIT.Extras
+
+
+-- TODO: Check on ghc version requirement
