@@ -6,6 +6,7 @@ Category:           Language
 Description:        Some definitions useful with HERMIT
 Author:             Conal Elliott
 Maintainer:         conal@conal.net
+Homepage:           http://github.com/conal/hermit-extras
 License:            BSD3
 License-File:       COPYING
 Stability:          experimental
