@@ -31,7 +31,7 @@ module HERMIT.Extras
   , ReExpr, ReCore, OkCM, TransformU, findTyConT
   , mkUnit, mkPair, mkLeft, mkRight, mkEither
   , InCoreTC
-  , observing, observeR', tries, triesL, labeled
+  , Observing, observeR', tries, triesL, labeled
   , varLitE, uqVarName, typeEtaLong, simplifyE
   , anytdE, inAppTys , isAppTy
   , letFloatToProg
@@ -250,7 +250,7 @@ tcFind2 :: String -> TransformU (Binop Type)
 tcFind2 = tcFind tcApp2
 
 callSplitT :: MonadCatch m =>
-              Transform c m CoreExpr (CoreExpr, [Type], [Expr CoreBndr])
+              Transform c m CoreExpr (CoreExpr, [Type], [CoreExpr])
 callSplitT = do (f,args) <- callT
                 let (tyArgs,valArgs) = splitTysVals args
                 return (f,tyArgs,valArgs)
@@ -297,24 +297,22 @@ mkEither = tcFind2 (eitherName "Either")
 
 type InCoreTC t = Injection t CoreTC
 
-observing :: Bool
-observing = False
+-- Whether we're observing rewrites
+type Observing = Bool
 
-observeR' :: InCoreTC t => String -> RewriteH t
-observeR' | observing = observeR
-          | otherwise = const idR
+observeR' :: Observing -> InCoreTC t => String -> RewriteH t
+observeR' True  = observeR
+observeR' False = const idR
 
 tries :: (InCoreTC a, InCoreTC t) => [TransformH a t] -> TransformH a t
 tries = foldr (<+) ({- observeR' "Unhandled" >>> -} fail "unhandled")
 
-triesL :: (InCoreTC a, InCoreTC t) => [(String,TransformH a t)] -> TransformH a t
-triesL = tries . map labeled
+triesL :: (InCoreTC a, InCoreTC t) =>
+          Observing -> [(String,TransformH a t)] -> TransformH a t
+triesL observing = tries . map (labeled observing)
 
--- triesL = foldr (<+) ({- observeR' "Unhandled" >>> -} fail "unhandled")
---              . map (uncurry labeled)
-
-labeled :: InCoreTC t => (String, TransformH a t) -> TransformH a t
-labeled (label,trans) = trans >>> observeR' label
+labeled :: InCoreTC t => Observing -> (String, TransformH a t) -> TransformH a t
+labeled observing (label,trans) = trans >>> observeR' observing label
 
 -- mkVarName :: MonadThings m => Transform c m Var (CoreExpr,Type)
 -- mkVarName = contextfreeT (mkStringExpr . uqName . varName) &&& arr varType
