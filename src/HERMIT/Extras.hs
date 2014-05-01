@@ -33,7 +33,7 @@ module HERMIT.Extras
   , InCoreTC
   , Observing, observeR', tries, triesL, labeled
   , varLitE, uqVarName, typeEtaLong, simplifyE
-  , anytdE, inAppTys , isAppTy
+  , anytdE, anybuE, inAppTys , isAppTy
   , letFloatToProg
   , concatProgs
   , rejectR , rejectTypeR
@@ -60,7 +60,7 @@ import HERMIT.Monad (HasModGuts(..),HasHscEnv(..))
 import HERMIT.Context (BoundVars)
 -- Note that HERMIT.Dictionary re-exports HERMIT.Dictionary.*
 import HERMIT.Dictionary
-  (findIdT, callT, callNameT, observeR, simplifyR, letFloatTopR)
+  (findIdT, callT, callNameT, observeR, bracketR, simplifyR, letFloatTopR)
 -- import HERMIT.Dictionary (traceR)
 import HERMIT.GHC hiding (FastString(..))
 import HERMIT.Kure hiding (apply)
@@ -85,7 +85,7 @@ apps f ts es
   | tyArity f /= length ts =
       error $ printf "apps: Id %s wants %d type arguments but got %d."
                      (var2String f) arity ntys
-  | otherwise = mkCoreApps (varToCoreExpr f) (map Type ts ++ es)
+  | otherwise = mkApps (varToCoreExpr f) (map Type ts ++ es)
  where
    arity = tyArity f
    ntys  = length ts
@@ -304,15 +304,18 @@ observeR' :: Observing -> InCoreTC t => String -> RewriteH t
 observeR' True  = observeR
 observeR' False = const idR
 
-tries :: (InCoreTC a, InCoreTC t) => [TransformH a t] -> TransformH a t
+tries :: InCoreTC t => [RewriteH t] -> RewriteH t
 tries = foldr (<+) ({- observeR' "Unhandled" >>> -} fail "unhandled")
 
-triesL :: (InCoreTC a, InCoreTC t) =>
-          Observing -> [(String,TransformH a t)] -> TransformH a t
+triesL :: InCoreTC t => Observing -> [(String,RewriteH t)] -> RewriteH t
 triesL observing = tries . map (labeled observing)
 
-labeled :: InCoreTC t => Observing -> (String, TransformH a t) -> TransformH a t
-labeled observing (label,trans) = trans >>> observeR' observing label
+-- labeled :: InCoreTC t => Observing -> (String, TransformH a t) -> TransformH a t
+-- labeled observing (label,trans) = trans >>> observeR' observing label
+
+labeled :: InCoreTC t => Observing -> (String, RewriteH t) -> RewriteH t
+labeled observing (label,trans) =
+  (if observing then bracketR label else id) trans
 
 -- mkVarName :: MonadThings m => Transform c m Var (CoreExpr,Type)
 -- mkVarName = contextfreeT (mkStringExpr . uqName . varName) &&& arr varType
@@ -341,6 +344,9 @@ simplifyE = extractR simplifyR
 
 anytdE :: Unop ReExpr
 anytdE r = extractR (anytdR (promoteR r :: ReCore))
+
+anybuE :: Unop ReExpr
+anybuE r = extractR (anybuR (promoteR r :: ReCore))
 
 -- TODO: Try rewriting more gracefully, testing isForAllTy first and
 -- maybeEtaExpandR
