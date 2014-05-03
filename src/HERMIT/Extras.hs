@@ -1,4 +1,4 @@
-{-# LANGUAGE Rank2Types, ConstraintKinds, PatternGuards, ViewPatterns #-}
+{-# LANGUAGE CPP, Rank2Types, ConstraintKinds, PatternGuards, ViewPatterns #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# OPTIONS_GHC -Wall #-}
 
@@ -25,7 +25,7 @@ module HERMIT.Extras
   , isPairTy, isEitherTy, isUnitTy, isBoolTy
   , unliftedType
   , apps, apps', callSplitT, callNameSplitT, unCall, unCall1
-  , collectForalls, subst, isTyLam, unSubCo_maybe
+  , collectForalls, subst, isTyLam, setNominalRole_maybe
     -- * HERMIT utilities
   , liftedKind, unliftedKind
   , ReExpr, ReCore, OkCM, TransformU, findTyConT
@@ -171,31 +171,40 @@ isTyLam :: CoreExpr -> Bool
 isTyLam (Lam v _) = isTyVar v
 isTyLam _         = False
 
--- Copied from Coercion in GHC 7.8.2. Sadly, not exported.
+#if __GLASGOW_HASKELL__ < 709
 
--- | Partial inverse to 'mkSubCo'
-unSubCo_maybe :: Coercion -> Maybe Coercion
-unSubCo_maybe (SubCo co)  = Just co
-unSubCo_maybe (Refl _ ty) = Just $ Refl Nominal ty
-unSubCo_maybe (TyConAppCo Representational tc coes)
-  = do { cos' <- mapM unSubCo_maybe coes
+{--------------------------------------------------------------------
+    Borrowed from GHC HEAD >= 7.9
+--------------------------------------------------------------------}
+
+-- Converts a coercion to be nominal, if possible.
+-- See also Note [Role twiddling functions]
+setNominalRole_maybe :: Coercion -> Maybe Coercion
+setNominalRole_maybe co
+  | Nominal <- coercionRole co = Just co
+setNominalRole_maybe (SubCo co)  = Just co
+setNominalRole_maybe (Refl _ ty) = Just $ Refl Nominal ty
+setNominalRole_maybe (TyConAppCo Representational tc coes)
+  = do { cos' <- mapM setNominalRole_maybe coes
        ; return $ TyConAppCo Nominal tc cos' }
-unSubCo_maybe (UnivCo Representational ty1 ty2) = Just $ UnivCo Nominal ty1 ty2
+setNominalRole_maybe (UnivCo Representational ty1 ty2) = Just $ UnivCo Nominal ty1 ty2
   -- We do *not* promote UnivCo Phantom, as that's unsafe.
   -- UnivCo Nominal is no more unsafe than UnivCo Representational
-unSubCo_maybe co
-  | Nominal <- coercionRole co = Just co
-unSubCo_maybe (TransCo co1 co2)
-  = TransCo <$> unSubCo_maybe co1 <*> unSubCo_maybe co2
-unSubCo_maybe (AppCo co1 co2)
-  = AppCo <$> unSubCo_maybe co1 <*> pure co2
-unSubCo_maybe (ForAllCo tv co)
-  = ForAllCo tv <$> unSubCo_maybe co
-unSubCo_maybe (NthCo n co)              -- this one *must* be after the general
-  = NthCo n <$> unSubCo_maybe co        -- Nominal check to be correct
-unSubCo_maybe (InstCo co ty)
-  = InstCo <$> unSubCo_maybe co <*> pure ty
-unSubCo_maybe _ = Nothing
+setNominalRole_maybe (TransCo co1 co2)
+  = TransCo <$> setNominalRole_maybe co1 <*> setNominalRole_maybe co2
+setNominalRole_maybe (AppCo co1 co2)
+  = AppCo <$> setNominalRole_maybe co1 <*> pure co2
+setNominalRole_maybe (ForAllCo tv co)
+  = ForAllCo tv <$> setNominalRole_maybe co
+setNominalRole_maybe (NthCo n co)
+  = NthCo n <$> setNominalRole_maybe co
+setNominalRole_maybe (InstCo co ty)
+  = InstCo <$> setNominalRole_maybe co <*> pure ty
+setNominalRole_maybe _ = Nothing
+
+#else
+
+#endif
 
 {--------------------------------------------------------------------
     HERMIT utilities
