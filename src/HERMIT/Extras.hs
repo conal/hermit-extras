@@ -2,8 +2,8 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# OPTIONS_GHC -Wall #-}
 
--- {-# OPTIONS_GHC -fno-warn-unused-imports #-} -- TEMP
--- {-# OPTIONS_GHC -fno-warn-unused-binds   #-} -- TEMP
+{-# OPTIONS_GHC -fno-warn-unused-imports #-} -- TEMP
+{-# OPTIONS_GHC -fno-warn-unused-binds   #-} -- TEMP
 
 ----------------------------------------------------------------------
 -- |
@@ -37,6 +37,7 @@ module HERMIT.Extras
   , letFloatToProg
   , concatProgs
   , rejectR , rejectTypeR
+  , simplifyExprT
   ) where
 
 import Prelude hiding (id,(.))
@@ -54,6 +55,7 @@ import Unique(hasKey)
 import PrelNames (
   liftedTypeKindTyConKey,unliftedTypeKindTyConKey,constraintKindTyConKey,
   eitherTyConName)
+import SimplCore (simplifyExpr)
 
 import HERMIT.Core (CoreProg(..),bindsToProg,progToBinds)
 import HERMIT.Monad (HasModGuts(..),HasHscEnv(..))
@@ -133,6 +135,7 @@ isUnitTy _                = False
 isBoolTy :: Type -> Bool
 isBoolTy (TyConApp tc []) = tc == boolTyCon
 isBoolTy _                = False
+
 liftedKind :: Kind -> Bool
 liftedKind (TyConApp tc []) =
   any (tc `hasKey`) [liftedTypeKindTyConKey, constraintKindTyConKey]
@@ -245,9 +248,10 @@ findTyConMG nm _ =
                       ++ " matches found: "
                       ++ intercalate ", " (showPpr dynFlags <$> ns)
 
-
 -- TODO: remove context argument, simplify OkCM, etc. See where it leads.
 -- <https://github.com/conal/type-encode/issues/2>
+
+-- TODO: Use findTyConT in HERMIT.Dictionary.Name instead of above.
 
 tcFind :: (TyCon -> b) -> String -> TransformU b
 tcFind h = fmap h . findTyConT
@@ -383,3 +387,8 @@ rejectR f = acceptR (not . f)
 -- | Reject if condition holds on an expression's type.
 rejectTypeR :: Monad m => (Type -> Bool) -> Rewrite c m CoreExpr
 rejectTypeR f = rejectR (f . exprType)
+
+simplifyExprT :: ReExpr
+simplifyExprT = contextfreeT $ \ e -> do
+    dflags <- getDynFlags
+    liftIO $ simplifyExpr dflags e
