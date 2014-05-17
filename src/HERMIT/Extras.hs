@@ -2,8 +2,8 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# OPTIONS_GHC -Wall #-}
 
-{-# OPTIONS_GHC -fno-warn-unused-imports #-} -- TEMP
-{-# OPTIONS_GHC -fno-warn-unused-binds   #-} -- TEMP
+-- {-# OPTIONS_GHC -fno-warn-unused-imports #-} -- TEMP
+-- {-# OPTIONS_GHC -fno-warn-unused-binds   #-} -- TEMP
 
 ----------------------------------------------------------------------
 -- |
@@ -15,6 +15,8 @@
 -- Some definitions useful with HERMIT.
 ----------------------------------------------------------------------
 
+-- #define WatchFailures
+
 module HERMIT.Extras
   ( -- * Misc
     Unop, Binop
@@ -22,13 +24,13 @@ module HERMIT.Extras
   , isType, exprType', pairTy
   , tcFind0, tcFind, tcFind2
   , tcApp0, tcApp1, tcApp2
-  , isPairTy, isEitherTy, isUnitTy, isBoolTy
+  , isPairTC, isPairTy, isEitherTy, isUnitTy, isBoolTy
   , unliftedType
   , apps, apps', callSplitT, callNameSplitT, unCall, unCall1
-  , collectForalls, subst, isTyLam, setNominalRole_maybe
+  , collectForalls, subst, isTyLam, setNominalRole_maybe, isVarT
     -- * HERMIT utilities
   , liftedKind, unliftedKind
-  , ReExpr, ReCore, OkCM, TransformU, findTyConT
+  , ReExpr, ReCore, FilterE, OkCM, TransformU, findTyConT
   , mkUnit, mkPair, mkLeft, mkRight, mkEither
   , InCoreTC
   , Observing, observeR', tries, triesL, labeled
@@ -37,7 +39,12 @@ module HERMIT.Extras
   , letFloatToProg
   , concatProgs
   , rejectR , rejectTypeR
-  , simplifyExprT
+  , simplifyExprT, whenChangedR
+  , showPprT
+  , externC
+  , unJustT, tcViewT, unFunCo
+  , lamFloatCastR, castCastR
+  , bashExtendedWithE
   ) where
 
 import Prelude hiding (id,(.))
@@ -57,15 +64,21 @@ import PrelNames (
   eitherTyConName)
 import SimplCore (simplifyExpr)
 
-import HERMIT.Core (CoreProg(..),bindsToProg,progToBinds)
-import HERMIT.Monad (HasModGuts(..),HasHscEnv(..))
+import HERMIT.Core (CoreProg(..),bindsToProg,progToBinds,exprAlphaEq)
+import HERMIT.Monad (HasModGuts(..),HasHscEnv(..),newIdH)
 import HERMIT.Context (BoundVars)
 -- Note that HERMIT.Dictionary re-exports HERMIT.Dictionary.*
 import HERMIT.Dictionary
-  (findIdT, callT, callNameT, observeR, bracketR, simplifyR, letFloatTopR)
+  ( findIdT, callT, callNameT, simplifyR, letFloatTopR
+  , observeR, bracketR, bashExtendedWithR
+#ifdef WatchFailures
+  , traceR
+#endif
+  )
 -- import HERMIT.Dictionary (traceR)
 import HERMIT.GHC hiding (FastString(..))
 import HERMIT.Kure hiding (apply)
+import HERMIT.External (External,external,ExternalName)
 
 {--------------------------------------------------------------------
     Misc
@@ -120,6 +133,9 @@ tcApp1 tc a = TyConApp tc [a]
 tcApp2 :: TyCon -> Binop Type
 tcApp2 tc a b = TyConApp tc [a,b]
 
+isPairTC :: TyCon -> Bool
+isPairTC tc = isBoxedTupleTyCon tc && tupleTyConArity tc == 2
+
 isPairTy :: Type -> Bool
 isPairTy (TyConApp tc [_,_]) = isBoxedTupleTyCon tc
 isPairTy _                   = False
@@ -173,6 +189,9 @@ subst ps = substExpr (error "subst: no SDoc") (foldr add emptySubst ps)
 isTyLam :: CoreExpr -> Bool
 isTyLam (Lam v _) = isTyVar v
 isTyLam _         = False
+
+isVarT :: TransformH CoreExpr ()
+isVarT = varT successT
 
 #if __GLASGOW_HASKELL__ < 709
 
@@ -230,6 +249,8 @@ apps' s ts es = (\ i -> apps i ts es) <$> findIdT s
 
 type ReExpr = RewriteH CoreExpr
 type ReCore = RewriteH Core
+
+type FilterE = TransformH CoreExpr ()
 
 -- | Lookup the name in the context first, then, failing that, in GHC's global
 -- reader environment.
@@ -326,9 +347,19 @@ triesL observing = tries . map (labeled observing)
 -- labeled :: InCoreTC t => Observing -> (String, TransformH a t) -> TransformH a t
 -- labeled observing (label,trans) = trans >>> observeR' observing label
 
-labeled :: InCoreTC t => Observing -> (String, RewriteH t) -> RewriteH t
-labeled observing (label,trans) =
-  (if observing then bracketR label else id) trans
+#ifdef WatchFailures
+scopeR :: InCoreTC a => String -> Unop (RewriteH a)
+scopeR label r = traceR ("Try " ++ label ) >>>
+                 -- r
+                 (r <+ (traceR (label ++ " failed") >>> fail "scopeR"))
+#endif
+
+labeled :: InCoreTC a => Observing -> (String, RewriteH a) -> RewriteH a
+labeled observing (label,r) =
+#ifdef WatchFailures
+  scopeR label $
+#endif
+  (if observing then bracketR label else id) r
 
 -- mkVarName :: MonadThings m => Transform c m Var (CoreExpr,Type)
 -- mkVarName = contextfreeT (mkStringExpr . uqName . varName) &&& arr varType
@@ -389,6 +420,66 @@ rejectTypeR :: Monad m => (Type -> Bool) -> Rewrite c m CoreExpr
 rejectTypeR f = rejectR (f . exprType)
 
 simplifyExprT :: ReExpr
-simplifyExprT = contextfreeT $ \ e -> do
-    dflags <- getDynFlags
-    liftIO $ simplifyExpr dflags e
+simplifyExprT =
+  whenChangedR "simplify-expr" $
+    prefixFailMsg "simplify-expr failed: " $
+      contextfreeT $ \ e ->
+        do dflags <- getDynFlags
+           liftIO $ simplifyExpr dflags e
+
+-- | Succeed only if the given rewrite actually changes the 
+whenChangedR :: String -> RewriteH CoreExpr -> RewriteH CoreExpr
+whenChangedR name r =
+  do (e,e') <- (r &&& idR)
+     guardMsg (not (exprAlphaEq e e'))
+      (name ++ ": result is unchanged from input.")
+     return e'
+
+-- | Get a GHC pretty-printing
+showPprT :: (HasDynFlags m, Outputable x, Monad m) =>
+            x -> Transform c m a String
+showPprT x = do dynFlags <- constT getDynFlags
+                return (showPpr dynFlags x)
+
+externC :: Injection a Core =>
+           ExternalName -> RewriteH a -> String -> External
+externC name rew help = external name (promoteR rew :: ReCore) [help]
+
+-- | unJust as transform. Fails on Nothing.
+-- Already in Kure?
+unJustT :: Monad m => Transform c m (Maybe a) a
+unJustT = do Just x <- idR
+             return x
+
+-- | GHC's tcView as a rewrite
+tcViewT :: RewriteH Type
+tcViewT = unJustT . arr tcView
+
+-- | Dissect a function coercion into role, domain, and range
+unFunCo :: Coercion -> Maybe (Role,Coercion,Coercion)
+unFunCo (TyConAppCo role tc [domCo,ranCo])
+  | isFunTyCon tc = Just (role,domCo,ranCo)
+unFunCo _ = Nothing
+
+-- | cast (\ v -> e) (domCo -> ranCo)
+--     ==> (\ v' -> cast (e[Var v <- cast (Var v') (SymCo domCo)]) ranCo)
+-- where v' :: a' if the whole expression had type a' -> b'.
+lamFloatCastR :: ReExpr
+lamFloatCastR = -- labelR "lamFloatCastR" $
+  do Cast (Lam v e) (unFunCo -> Just (_,domCo,ranCo)) <- idR
+     Just (domTy,_) <- arr (splitFunTy_maybe . exprType')
+     v' <- constT $ newIdH (uqVarName v) domTy
+     let e' = subst [(v, Cast (Var v') (SymCo domCo))] e
+     return (Lam v' (Cast e' ranCo))
+
+-- TODO: Should I check the role?
+
+-- | cast (cast e co) co' ==> cast e (mkTransCo co co')
+castCastR :: ReExpr
+castCastR = -- labelR "castCastR" $
+            do (Cast (Cast e co) co') <- idR
+               return (Cast e (mkTransCo co co'))
+
+-- | Like bashExtendedWith, but for expressions
+bashExtendedWithE :: [ReExpr] -> ReExpr
+bashExtendedWithE rs = extractR (bashExtendedWithR (promoteR <$> rs))
