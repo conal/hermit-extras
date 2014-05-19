@@ -27,10 +27,11 @@ module HERMIT.Extras
   , isPairTC, isPairTy, isEitherTy, isUnitTy, isBoolTy
   , unliftedType
   , apps, apps', callSplitT, callNameSplitT, unCall, unCall1
-  , collectForalls, subst, isTyLam, setNominalRole_maybe, isVarT
+  , collectForalls, subst, isTyLam, setNominalRole_maybe
+  , isVarT, isLitT
     -- * HERMIT utilities
   , liftedKind, unliftedKind
-  , ReExpr, ReCore, FilterE, OkCM, TransformU, findTyConT
+  , ReExpr, ReCore, FilterH, FilterE, OkCM, TransformU, findTyConT, isTypeE
   , mkUnit, mkPair, mkLeft, mkRight, mkEither
   , InCoreTC
   , Observing, observeR', tries, triesL, labeled
@@ -193,6 +194,9 @@ isTyLam _         = False
 isVarT :: TransformH CoreExpr ()
 isVarT = varT successT
 
+isLitT :: TransformH CoreExpr ()
+isLitT = litT successT
+
 #if __GLASGOW_HASKELL__ < 709
 
 {--------------------------------------------------------------------
@@ -249,8 +253,6 @@ apps' s ts es = (\ i -> apps i ts es) <$> findIdT s
 
 type ReExpr = RewriteH CoreExpr
 type ReCore = RewriteH Core
-
-type FilterE = TransformH CoreExpr ()
 
 -- | Lookup the name in the context first, then, failing that, in GHC's global
 -- reader environment.
@@ -483,3 +485,9 @@ castCastR = -- labelR "castCastR" $
 -- | Like bashExtendedWith, but for expressions
 bashExtendedWithE :: [ReExpr] -> ReExpr
 bashExtendedWithE rs = extractR (bashExtendedWithR (promoteR <$> rs))
+
+type FilterH a = TransformH a ()
+type FilterE = FilterH CoreExpr
+
+isTypeE :: FilterE
+isTypeE = typeT successT
