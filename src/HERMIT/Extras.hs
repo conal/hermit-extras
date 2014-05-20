@@ -1,5 +1,6 @@
 {-# LANGUAGE CPP, Rank2Types, ConstraintKinds, PatternGuards, ViewPatterns #-}
-{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleContexts, FlexibleInstances, MultiParamTypeClasses #-}
+{-# LANGUAGE UndecidableInstances #-} -- see below
 {-# OPTIONS_GHC -Wall #-}
 
 -- {-# OPTIONS_GHC -fno-warn-unused-imports #-} -- TEMP
@@ -46,6 +47,7 @@ module HERMIT.Extras
   , unJustT, tcViewT, unFunCo
   , lamFloatCastR, castCastR
   , bashExtendedWithE
+  , CustomC(..),liftToHermitC, projectHermitC, debugR -- , liftCustomC
   ) where
 
 import Prelude hiding (id,(.))
@@ -65,9 +67,10 @@ import PrelNames (
   eitherTyConName)
 import SimplCore (simplifyExpr)
 
+-- import Language.KURE.Transform (apply)
 import HERMIT.Core (CoreProg(..),bindsToProg,progToBinds,exprAlphaEq)
-import HERMIT.Monad (HasModGuts(..),HasHscEnv(..),newIdH)
-import HERMIT.Context (BoundVars)
+import HERMIT.Monad (HermitM,HasModGuts(..),HasHscEnv(..),newIdH)
+import HERMIT.Context (BoundVars(..),AddBindings(..),ReadBindings(..),HermitC)
 -- Note that HERMIT.Dictionary re-exports HERMIT.Dictionary.*
 import HERMIT.Dictionary
   ( findIdT, callT, callNameT, simplifyR, letFloatTopR
@@ -491,3 +494,54 @@ type FilterE = FilterH CoreExpr
 
 isTypeE :: FilterE
 isTypeE = typeT successT
+
+{--------------------------------------------------------------------
+    
+--------------------------------------------------------------------}
+
+-- Adapted from Andrew Farmer's code
+-- <https://github.com/ku-fpg/hermit/issues/101#issuecomment-43463849>
+
+data CustomC = CustomC { cDebugFlag :: Bool, cHermitC :: HermitC }
+
+liftToHermitC :: Unop HermitC -> Unop CustomC
+liftToHermitC f c = c { cHermitC = f (cHermitC c) }
+
+projectHermitC :: (HermitC -> a) -> (CustomC -> a)
+projectHermitC r c = r (cHermitC c)
+
+instance AddBindings CustomC where
+  addHermitBindings bs = liftToHermitC (addHermitBindings bs)
+
+instance BoundVars CustomC where
+  boundVars = projectHermitC boundVars
+
+instance ReadBindings CustomC where
+  hermitDepth    = projectHermitC hermitDepth
+  hermitBindings = projectHermitC hermitBindings
+
+instance ReadPath HermitC crumb => ReadPath CustomC crumb where
+  -- | Read the current absolute path.
+  absPath = projectHermitC absPath
+
+--     Constraint is no smaller than the instance head
+--       in the constraint: ReadPath HermitC crumb
+--     (Use UndecidableInstances to permit this)
+
+-- Then you can write something like:
+
+debugCustomR :: Injection a CoreTC => Unop (Rewrite CustomC HermitM a)
+debugCustomR rr = do
+    c <- contextT
+    if cDebugFlag c then bracketR "debug" rr else rr
+
+debugR :: Injection b CoreTC =>
+          Rewrite CustomC HermitM b -> RewriteH b
+debugR r = liftContext (CustomC True) (debugCustomR r)
+
+-- TODO: Can I eliminate the CustomC requirement in debugR?
+
+-- And call it from your plugin with:
+
+-- run $ liftCustomC True $ focusR (occurenceOfT "fib") (debugR inlineR)
+
