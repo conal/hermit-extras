@@ -37,7 +37,7 @@ module HERMIT.Extras
   , ReExpr, ReCore, FilterH, FilterE, OkCM, TransformU, findTyConT, isTypeE
   , mkUnit, mkPair, mkLeft, mkRight, mkEither
   , InCoreTC
-  , Observing, observeR', tries, triesL, labeled
+  , Observing, observeR', tries, triesL, labeled, labeledR
   , varLitE, uqVarName, typeEtaLong, simplifyE
   , anytdE, anybuE, inAppTys , isAppTy
   , letFloatToProg
@@ -74,7 +74,9 @@ import SimplCore (simplifyExpr)
 import HERMIT.Core (CoreProg(..),Crumb,bindsToProg,progToBinds,exprAlphaEq)
 import HERMIT.Monad (HermitM,HasModGuts(..),HasHscEnv(..),newIdH)
 import HERMIT.Context
-  (BoundVars(..),AddBindings(..),ReadBindings(..),HasEmptyContext(..),HermitC)
+  ( BoundVars(..),AddBindings(..),ReadBindings(..)
+  , HasEmptyContext(..), HasCoreRules(..)
+  , HermitC )
 -- Note that HERMIT.Dictionary re-exports HERMIT.Dictionary.*
 import HERMIT.Dictionary
   ( findIdT, callT, callNameT, simplifyR, letFloatTopR
@@ -377,6 +379,13 @@ labeled observing (label,r) =
 #endif
   (if observing then bracketR label else id) r
 
+-- TODO: Eliminate labeled.
+
+labeledR :: InCoreTC a => String -> Unop (RewriteC a)
+labeledR label r =
+  do c <- contextT
+     labeled (cDebugFlag c) (label,r)
+
 -- mkVarName :: MonadThings m => Transform c m Var (CoreExpr,Type)
 -- mkVarName = contextfreeT (mkStringExpr . uqName . varName) &&& arr varType
 
@@ -539,6 +548,9 @@ instance ReadBindings CustomC where
   hermitDepth    = projectHermitC hermitDepth
   hermitBindings = projectHermitC hermitBindings
 
+instance HasCoreRules CustomC where
+    hermitCoreRules = projectHermitC hermitCoreRules
+
 instance HasEmptyContext CustomC where
   setEmptyContext c =
     c { cDebugFlag = False
@@ -562,19 +574,8 @@ instance Extern (RewriteC Core) where
     box = RewriteCCoreBox
     unbox (RewriteCCoreBox r) = r
 
--- Then you can write something like:
-
-debugCustomR :: Injection a CoreTC => Unop (RewriteC a)
-debugCustomR rr = do
-    c <- contextT
-    if cDebugFlag c then bracketR "debug" rr else rr
-
-debugR :: Injection b CoreTC => RewriteC b -> RewriteH b
-debugR r = liftContext (CustomC True) (debugCustomR r)
+debugR :: Bool -> Injection b CoreTC => RewriteC b -> RewriteH b
+debugR b = liftContext (CustomC b)
 
 -- TODO: Can I eliminate the CustomC requirement in debugR?
-
--- And call it from your plugin with:
-
--- run $ liftCustomC True $ focusR (occurenceOfT "fib") (debugR inlineR)
 
