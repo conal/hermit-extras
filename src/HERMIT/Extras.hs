@@ -469,11 +469,21 @@ showPprT :: (HasDynFlags m, Outputable x, Monad m) =>
 showPprT x = do dynFlags <- constT getDynFlags
                 return (showPpr dynFlags x)
 
+#if 0
 externC :: forall c m a.
            (Monad m, Injection a Core, Extern (Rewrite c m Core)) =>
            ExternalName -> Rewrite c m a -> String -> External
 externC name rew help =
   external name (promoteR rew :: Rewrite c m Core) [help]
+#endif
+
+externC :: (Injection a Core) =>
+           ExternalName -> RewriteC a -> String -> External
+externC name rew help =
+  external name (promoteR (debugR True rew) :: RewriteH Core) [help]
+
+-- OOPS. Not what I want, since it turns on debugging when the command is
+-- defined. I want to turn it on dynamically.
 
 -- | unJust as transform. Fails on Nothing.
 -- Already in Kure?
@@ -574,7 +584,7 @@ instance Extern (RewriteC Core) where
     box = RewriteCCoreBox
     unbox (RewriteCCoreBox r) = r
 
-debugR :: Bool -> Injection b CoreTC => RewriteC b -> RewriteH b
+debugR :: Bool -> RewriteC b -> RewriteH b
 debugR b = liftContext (CustomC b)
 
 -- TODO: Can I eliminate the CustomC requirement in debugR?
