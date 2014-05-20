@@ -1,5 +1,7 @@
 {-# LANGUAGE CPP, Rank2Types, ConstraintKinds, PatternGuards, ViewPatterns #-}
 {-# LANGUAGE FlexibleContexts, FlexibleInstances, MultiParamTypeClasses #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE DeriveDataTypeable, TypeFamilies #-}
 {-# LANGUAGE UndecidableInstances #-} -- see below
 {-# OPTIONS_GHC -Wall #-}
 
@@ -47,7 +49,7 @@ module HERMIT.Extras
   , unJustT, tcViewT, unFunCo
   , lamFloatCastR, castCastR
   , bashExtendedWithE
-  , CustomC(..),liftToHermitC, projectHermitC, debugR -- , liftCustomC
+  , CustomC(..), TransformC, RewriteC,onHermitC, projectHermitC, debugR -- , liftCustomC
   ) where
 
 import Prelude hiding (id,(.))
@@ -58,6 +60,7 @@ import Control.Applicative (Applicative(..))
 import Control.Arrow (Arrow(..))
 import Data.List (intercalate)
 import Text.Printf (printf)
+import Data.Typeable (Typeable)
 import Control.Monad.IO.Class (MonadIO)
 
 -- GHC
@@ -68,9 +71,10 @@ import PrelNames (
 import SimplCore (simplifyExpr)
 
 -- import Language.KURE.Transform (apply)
-import HERMIT.Core (CoreProg(..),bindsToProg,progToBinds,exprAlphaEq)
+import HERMIT.Core (CoreProg(..),Crumb,bindsToProg,progToBinds,exprAlphaEq)
 import HERMIT.Monad (HermitM,HasModGuts(..),HasHscEnv(..),newIdH)
-import HERMIT.Context (BoundVars(..),AddBindings(..),ReadBindings(..),HermitC)
+import HERMIT.Context
+  (BoundVars(..),AddBindings(..),ReadBindings(..),HasEmptyContext(..),HermitC)
 -- Note that HERMIT.Dictionary re-exports HERMIT.Dictionary.*
 import HERMIT.Dictionary
   ( findIdT, callT, callNameT, simplifyR, letFloatTopR
@@ -82,7 +86,7 @@ import HERMIT.Dictionary
 -- import HERMIT.Dictionary (traceR)
 import HERMIT.GHC hiding (FastString(..))
 import HERMIT.Kure hiding (apply)
-import HERMIT.External (External,external,ExternalName)
+import HERMIT.External (External,Extern(..),external,ExternalName)
 
 {--------------------------------------------------------------------
     Misc
@@ -194,10 +198,12 @@ isTyLam :: CoreExpr -> Bool
 isTyLam (Lam v _) = isTyVar v
 isTyLam _         = False
 
-isVarT :: TransformH CoreExpr ()
+isVarT :: (Monad m, ExtendPath c Crumb) =>
+          Transform c m CoreExpr ()
 isVarT = varT successT
 
-isLitT :: TransformH CoreExpr ()
+isLitT :: (Monad m, ExtendPath c Crumb) =>
+          Transform c m CoreExpr ()
 isLitT = litT successT
 
 #if __GLASGOW_HASKELL__ < 709
@@ -250,12 +256,15 @@ type OkCM c m =
 
 type TransformU b = forall c m a. OkCM c m => Transform c m a b
 
+type TransformM c a b = Transform c HermitM a b
+type RewriteM c a = TransformM c a a
+
 -- Apply a named id to type and value arguments.
 apps' :: String -> [Type] -> [CoreExpr] -> TransformU CoreExpr
 apps' s ts es = (\ i -> apps i ts es) <$> findIdT s
 
-type ReExpr = RewriteH CoreExpr
-type ReCore = RewriteH Core
+type ReExpr = RewriteC CoreExpr
+type ReCore = RewriteC Core
 
 -- | Lookup the name in the context first, then, failing that, in GHC's global
 -- reader environment.
@@ -303,7 +312,8 @@ callNameSplitT name = do (f,args) <- callNameT name
 -- TODO: refactor with something like HERMIT's callPredT
 
 -- | Uncall a named function
-unCall :: String -> TransformH CoreExpr [CoreExpr]
+unCall :: MonadCatch m =>
+          String -> Transform c m CoreExpr [CoreExpr]
 unCall f = do (_f,_tys,args) <- callNameSplitT f
               return args
 
@@ -339,27 +349,28 @@ type InCoreTC t = Injection t CoreTC
 -- Whether we're observing rewrites
 type Observing = Bool
 
-observeR' :: Observing -> InCoreTC t => String -> RewriteH t
+observeR' :: (ReadBindings c, ReadPath c Crumb) =>
+             Observing -> InCoreTC t => String -> RewriteM c t
 observeR' True  = observeR
 observeR' False = const idR
 
-tries :: InCoreTC t => [RewriteH t] -> RewriteH t
+tries :: (MonadCatch m, InCoreTC t) =>
+         [Rewrite c m t] -> Rewrite c m t
 tries = foldr (<+) ({- observeR' "Unhandled" >>> -} fail "unhandled")
 
-triesL :: InCoreTC t => Observing -> [(String,RewriteH t)] -> RewriteH t
+triesL :: (ReadBindings c, ReadPath c Crumb, InCoreTC t) =>
+          Observing -> [(String,RewriteM c t)] -> RewriteM c t
 triesL observing = tries . map (labeled observing)
 
--- labeled :: InCoreTC t => Observing -> (String, TransformH a t) -> TransformH a t
--- labeled observing (label,trans) = trans >>> observeR' observing label
-
 #ifdef WatchFailures
-scopeR :: InCoreTC a => String -> Unop (RewriteH a)
+scopeR :: InCoreTC a => String -> Unop (RewriteM c a)
 scopeR label r = traceR ("Try " ++ label ) >>>
                  -- r
                  (r <+ (traceR (label ++ " failed") >>> fail "scopeR"))
 #endif
 
-labeled :: InCoreTC a => Observing -> (String, RewriteH a) -> RewriteH a
+labeled :: (ReadBindings c, ReadPath c Crumb, InCoreTC a) =>
+           Observing -> (String, RewriteM c a) -> RewriteM c a
 labeled observing (label,r) =
 #ifdef WatchFailures
   scopeR label $
@@ -410,8 +421,11 @@ isAppTy :: CoreExpr -> Bool
 isAppTy (App _ (Type _)) = True
 isAppTy _                = False
 
-letFloatToProg :: TransformH CoreBind CoreProg
+letFloatToProg :: (BoundVars c, AddBindings c, ReadPath c Crumb, ExtendPath c Crumb) =>
+                  TransformM c CoreBind CoreProg
 letFloatToProg = arr (flip ProgCons ProgNil) >>> tryR letFloatTopR
+
+-- TODO: alias for these c constraints.
 
 concatProgs :: [CoreProg] -> CoreProg
 concatProgs = bindsToProg . concatMap progToBinds
@@ -433,7 +447,7 @@ simplifyExprT =
            liftIO $ simplifyExpr dflags e
 
 -- | Succeed only if the given rewrite actually changes the 
-whenChangedR :: String -> RewriteH CoreExpr -> RewriteH CoreExpr
+whenChangedR :: String -> Unop (RewriteM c CoreExpr)
 whenChangedR name r =
   do (e,e') <- (r &&& idR)
      guardMsg (not (exprAlphaEq e e'))
@@ -446,9 +460,11 @@ showPprT :: (HasDynFlags m, Outputable x, Monad m) =>
 showPprT x = do dynFlags <- constT getDynFlags
                 return (showPpr dynFlags x)
 
-externC :: Injection a Core =>
-           ExternalName -> RewriteH a -> String -> External
-externC name rew help = external name (promoteR rew :: ReCore) [help]
+externC :: forall c m a.
+           (Monad m, Injection a Core, Extern (Rewrite c m Core)) =>
+           ExternalName -> Rewrite c m a -> String -> External
+externC name rew help =
+  external name (promoteR rew :: Rewrite c m Core) [help]
 
 -- | unJust as transform. Fails on Nothing.
 -- Already in Kure?
@@ -457,7 +473,7 @@ unJustT = do Just x <- idR
              return x
 
 -- | GHC's tcView as a rewrite
-tcViewT :: RewriteH Type
+tcViewT :: RewriteM c Type
 tcViewT = unJustT . arr tcView
 
 -- | Dissect a function coercion into role, domain, and range
@@ -489,7 +505,7 @@ castCastR = -- labelR "castCastR" $
 bashExtendedWithE :: [ReExpr] -> ReExpr
 bashExtendedWithE rs = extractR (bashExtendedWithR (promoteR <$> rs))
 
-type FilterH a = TransformH a ()
+type FilterH a = TransformC a ()
 type FilterE = FilterH CoreExpr
 
 isTypeE :: FilterE
@@ -504,14 +520,17 @@ isTypeE = typeT successT
 
 data CustomC = CustomC { cDebugFlag :: Bool, cHermitC :: HermitC }
 
-liftToHermitC :: Unop HermitC -> Unop CustomC
-liftToHermitC f c = c { cHermitC = f (cHermitC c) }
+type TransformC a b = Transform CustomC HermitM a b
+type RewriteC a = TransformC a a
+
+onHermitC :: Unop HermitC -> Unop CustomC
+onHermitC f c = c { cHermitC = f (cHermitC c) }
 
 projectHermitC :: (HermitC -> a) -> (CustomC -> a)
 projectHermitC r c = r (cHermitC c)
 
 instance AddBindings CustomC where
-  addHermitBindings bs = liftToHermitC (addHermitBindings bs)
+  addHermitBindings bs = onHermitC (addHermitBindings bs)
 
 instance BoundVars CustomC where
   boundVars = projectHermitC boundVars
@@ -520,23 +539,37 @@ instance ReadBindings CustomC where
   hermitDepth    = projectHermitC hermitDepth
   hermitBindings = projectHermitC hermitBindings
 
+instance HasEmptyContext CustomC where
+  setEmptyContext c =
+    c { cDebugFlag = False
+      , cHermitC = setEmptyContext (cHermitC c)
+      }
+
 instance ReadPath HermitC crumb => ReadPath CustomC crumb where
-  -- | Read the current absolute path.
   absPath = projectHermitC absPath
 
 --     Constraint is no smaller than the instance head
 --       in the constraint: ReadPath HermitC crumb
 --     (Use UndecidableInstances to permit this)
 
+instance ExtendPath HermitC crumb => ExtendPath CustomC crumb where
+  c @@ crumb = onHermitC (@@ crumb) c
+
+data RewriteCCoreBox = RewriteCCoreBox (RewriteC Core) deriving Typeable
+
+instance Extern (RewriteC Core) where
+    type Box (RewriteC Core) = RewriteCCoreBox
+    box = RewriteCCoreBox
+    unbox (RewriteCCoreBox r) = r
+
 -- Then you can write something like:
 
-debugCustomR :: Injection a CoreTC => Unop (Rewrite CustomC HermitM a)
+debugCustomR :: Injection a CoreTC => Unop (RewriteC a)
 debugCustomR rr = do
     c <- contextT
     if cDebugFlag c then bracketR "debug" rr else rr
 
-debugR :: Injection b CoreTC =>
-          Rewrite CustomC HermitM b -> RewriteH b
+debugR :: Injection b CoreTC => RewriteC b -> RewriteH b
 debugR r = liftContext (CustomC True) (debugCustomR r)
 
 -- TODO: Can I eliminate the CustomC requirement in debugR?
