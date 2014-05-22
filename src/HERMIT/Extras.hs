@@ -5,7 +5,7 @@
 {-# LANGUAGE UndecidableInstances #-} -- see below
 {-# OPTIONS_GHC -Wall #-}
 
--- {-# OPTIONS_GHC -fno-warn-unused-imports #-} -- TEMP
+{-# OPTIONS_GHC -fno-warn-unused-imports #-} -- TEMP
 -- {-# OPTIONS_GHC -fno-warn-unused-binds   #-} -- TEMP
 
 ----------------------------------------------------------------------
@@ -34,28 +34,32 @@ module HERMIT.Extras
   , isVarT, isLitT
     -- * HERMIT utilities
   , liftedKind, unliftedKind
-  , ReExpr, ReCore, FilterH, FilterE, OkCM, TransformU, findTyConT, isTypeE
+  , ReExpr, ReCore, FilterC, FilterE, OkCM, TransformU, findTyConT, isTypeE
   , mkUnit, mkPair, mkLeft, mkRight, mkEither
   , InCoreTC
   , Observing, observeR', tries, triesL, labeled, labeledR
+  , lintExprR -- , lintExprDieR
+  , lintingExprR
   , varLitE, uqVarName, typeEtaLong, simplifyE
   , anytdE, anybuE, inAppTys , isAppTy
   , letFloatToProg
   , concatProgs
   , rejectR , rejectTypeR
-  , simplifyExprT, whenChangedR
+  , simplifyExprR, whenChangedR
   , showPprT
-  , externC
+  , externC', externC
   , unJustT, tcViewT, unFunCo
-  , lamFloatCastR, castCastR
+  , lamFloatCastR, castCastR, unCastCastR, castFloatAppR'
+  , caseWildR
   , bashExtendedWithE
   , CustomC(..), TransformC, RewriteC,onHermitC, projectHermitC, debugR -- , liftCustomC
+  , repeatN
   ) where
 
 import Prelude hiding (id,(.))
 
 import Control.Category (Category(..),(>>>))
-import Data.Functor ((<$>))
+import Data.Functor ((<$>),(<$))
 import Control.Applicative (Applicative(..))
 import Control.Arrow (Arrow(..))
 import Data.List (intercalate)
@@ -69,6 +73,7 @@ import PrelNames (
   liftedTypeKindTyConKey,unliftedTypeKindTyConKey,constraintKindTyConKey,
   eitherTyConName)
 import SimplCore (simplifyExpr)
+import qualified Coercion
 
 -- import Language.KURE.Transform (apply)
 import HERMIT.Core (CoreProg(..),Crumb,bindsToProg,progToBinds,exprAlphaEq)
@@ -80,7 +85,8 @@ import HERMIT.Context
 -- Note that HERMIT.Dictionary re-exports HERMIT.Dictionary.*
 import HERMIT.Dictionary
   ( findIdT, callT, callNameT, simplifyR, letFloatTopR
-  , observeR, bracketR, bashExtendedWithR
+  , observeR, bracketR, bashExtendedWithR, bashR, wrongExprForm
+  , castFloatAppR, unshadowR, lintExprT
 #ifdef WatchFailures
   , traceR
 #endif
@@ -200,11 +206,14 @@ isTyLam :: CoreExpr -> Bool
 isTyLam (Lam v _) = isTyVar v
 isTyLam _         = False
 
-isVarT :: (Monad m, ExtendPath c Crumb) =>
+type ExtendCrumb c = ExtendPath c Crumb
+type ReadCrumb   c = ReadPath   c Crumb
+
+isVarT :: (Monad m, ExtendCrumb c) =>
           Transform c m CoreExpr ()
 isVarT = varT successT
 
-isLitT :: (Monad m, ExtendPath c Crumb) =>
+isLitT :: (Monad m, ExtendCrumb c) =>
           Transform c m CoreExpr ()
 isLitT = litT successT
 
@@ -351,7 +360,7 @@ type InCoreTC t = Injection t CoreTC
 -- Whether we're observing rewrites
 type Observing = Bool
 
-observeR' :: (ReadBindings c, ReadPath c Crumb) =>
+observeR' :: (ReadBindings c, ReadCrumb c) =>
              Observing -> InCoreTC t => String -> RewriteM c t
 observeR' True  = observeR
 observeR' False = const idR
@@ -360,7 +369,7 @@ tries :: (MonadCatch m, InCoreTC t) =>
          [Rewrite c m t] -> Rewrite c m t
 tries = foldr (<+) ({- observeR' "Unhandled" >>> -} fail "unhandled")
 
-triesL :: (ReadBindings c, ReadPath c Crumb, InCoreTC t) =>
+triesL :: (ReadBindings c, ReadCrumb c, InCoreTC t) =>
           Observing -> [(String,RewriteM c t)] -> RewriteM c t
 triesL observing = tries . map (labeled observing)
 
@@ -371,13 +380,46 @@ scopeR label r = traceR ("Try " ++ label ) >>>
                  (r <+ (traceR (label ++ " failed") >>> fail "scopeR"))
 #endif
 
-labeled :: (ReadBindings c, ReadPath c Crumb, InCoreTC a) =>
+labeled :: (ReadBindings c, ReadCrumb c, InCoreTC a) =>
            Observing -> (String, RewriteM c a) -> RewriteM c a
 labeled observing (label,r) =
 #ifdef WatchFailures
   scopeR label $
 #endif
   (if observing then bracketR label else id) r
+
+lintExprR :: (Functor m, Monad m, HasDynFlags m, BoundVars c) =>
+             Rewrite c m CoreExpr
+lintExprR = (id &&& lintExprT) >>> arr fst
+
+#if 0
+-- lintExprR = ifM (True <$ lintExprT) id (fail "lint failure")
+
+lintExprDieR :: (Functor m, MonadCatch m, HasDynFlags m, BoundVars c) =>
+                Rewrite c m CoreExpr
+lintExprDieR = lintExprR `catchM` error
+
+-- lintExprT :: (BoundVars c, Monad m, HasDynFlags m) =>
+--              Transform c m CoreExpr String
+#endif
+
+-- | Apply a rewrite rule. If it succeeds but the result fails to pass
+-- core-lint, show the before and after (via 'bracketR') and die with the
+-- core-lint error message.
+lintingExprR :: ( ReadBindings c, ReadCrumb c
+                , BoundVars c, AddBindings c, ExtendCrumb c, HasEmptyContext c  -- for unshadowR
+                ) =>
+                String -> Unop (Rewrite c HermitM CoreExpr)
+lintingExprR msg rr =
+  do e  <- idR
+     e' <- rr
+     res <- attemptM (return e' >>> lintExprT)
+     either (\ lintMsg -> return e >>>
+                          extractR (tryR unshadowR) >>> -- TEMP
+                          bracketR msg rr >>>
+                          error lintMsg)
+            (const (return e'))
+            res
 
 -- TODO: Eliminate labeled.
 
@@ -430,7 +472,7 @@ isAppTy :: CoreExpr -> Bool
 isAppTy (App _ (Type _)) = True
 isAppTy _                = False
 
-letFloatToProg :: (BoundVars c, AddBindings c, ReadPath c Crumb, ExtendPath c Crumb) =>
+letFloatToProg :: (BoundVars c, AddBindings c, ReadCrumb c, ExtendCrumb c) =>
                   TransformM c CoreBind CoreProg
 letFloatToProg = arr (flip ProgCons ProgNil) >>> tryR letFloatTopR
 
@@ -447,21 +489,27 @@ rejectR f = acceptR (not . f)
 rejectTypeR :: Monad m => (Type -> Bool) -> Rewrite c m CoreExpr
 rejectTypeR f = rejectR (f . exprType)
 
-simplifyExprT :: ReExpr
-simplifyExprT =
-  whenChangedR "simplify-expr" $
+-- | Succeed only if the given rewrite actually changes the 
+whenChangedR :: String -> (a -> a -> Bool) -> Unop (RewriteM c a)
+whenChangedR name eq r =
+  do (e,e') <- (r &&& idR)
+     guardMsg (not (eq e e'))
+      (name ++ ": result is unchanged from input.")
+     return e'
+
+-- TODO: Replace whenChangedR with changedByR from KURE.Combinators.Transform.
+
+-- | Use GHC expression simplifier and succeed if different. Sadly, the check
+-- gives false positives, which spoils its usefulness.
+simplifyExprR :: ReExpr
+simplifyExprR =
+  whenChangedR "simplify-expr" exprAlphaEq $
     prefixFailMsg "simplify-expr failed: " $
       contextfreeT $ \ e ->
         do dflags <- getDynFlags
            liftIO $ simplifyExpr dflags e
 
--- | Succeed only if the given rewrite actually changes the 
-whenChangedR :: String -> Unop (RewriteM c CoreExpr)
-whenChangedR name r =
-  do (e,e') <- (r &&& idR)
-     guardMsg (not (exprAlphaEq e e'))
-      (name ++ ": result is unchanged from input.")
-     return e'
+-- TODO: An EQ-like type class for comparisons.
 
 -- | Get a GHC pretty-printing
 showPprT :: (HasDynFlags m, Outputable x, Monad m) =>
@@ -477,10 +525,14 @@ externC name rew help =
   external name (promoteR rew :: Rewrite c m Core) [help]
 #endif
 
-externC :: (Injection a Core) =>
+externC' :: Injection a Core =>
+            Bool -> ExternalName -> RewriteC a -> String -> External
+externC' dbg name rew help =
+  external name (promoteR (debugR dbg rew) :: RewriteH Core) [help]
+
+externC :: Injection a Core =>
            ExternalName -> RewriteC a -> String -> External
-externC name rew help =
-  external name (promoteR (debugR True rew) :: RewriteH Core) [help]
+externC = externC' False
 
 -- OOPS. Not what I want, since it turns on debugging when the command is
 -- defined. I want to turn it on dynamically.
@@ -520,12 +572,41 @@ castCastR = -- labelR "castCastR" $
             do (Cast (Cast e co) co') <- idR
                return (Cast e (mkTransCo co co'))
 
+-- e `cast` (co1 ; co2)  ==>  (e `cast` co1) `cast` co2
+-- Handle with care. Don't mix with its inverse, 'castCastR'.
+unCastCastR :: Monad m => Rewrite c m CoreExpr
+unCastCastR = do e `Cast` (co1 `TransCo` co2) <- idR
+                 return ((e `Cast` co1) `Cast` co2)
+
+-- Like 'castFloatAppR', but handles transitivy coercions.
+castFloatAppR' :: (MonadCatch m, ExtendCrumb c) =>
+                  Rewrite c m CoreExpr
+
+-- castFloatAppR' = castFloatAppR <+
+--                  (appAllR unCastCastR id >>> castFloatAppR)
+
+castFloatAppR' = tryR (appAllR unCastCastR id) >>> castFloatAppR
+
+-- | case scrut of wild t { _ -> body }
+--    ==> let wild = scrut in body
+-- May be followed by let-elimination.
+-- Warning: does not capture GHC's intent to reduce scrut to WHNF.
+caseWildR :: ReExpr
+caseWildR = labeledR "reifyCaseWild" $
+  do Case scrut wild _bodyTy [(DEFAULT,[],body)] <- idR
+     return $ Let (NonRec wild scrut) body
+
+
 -- | Like bashExtendedWith, but for expressions
 bashExtendedWithE :: [ReExpr] -> ReExpr
 bashExtendedWithE rs = extractR (bashExtendedWithR (promoteR <$> rs))
 
-type FilterH a = TransformC a ()
-type FilterE = FilterH CoreExpr
+-- -- | bashE for expressions
+-- bashE :: ReExpr
+-- bashE = extractR bashR
+
+type FilterC a = TransformC a ()
+type FilterE = FilterC CoreExpr
 
 isTypeE :: FilterE
 isTypeE = typeT successT
@@ -589,3 +670,6 @@ debugR b = liftContext (CustomC b)
 
 -- TODO: Can I eliminate the CustomC requirement in debugR?
 
+-- | Repeat a rewriter exactly @n@ times.
+repeatN :: Monad m => Int -> Unop (Rewrite c m a)
+repeatN n = serialise . replicate n
