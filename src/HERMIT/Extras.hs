@@ -24,23 +24,25 @@ module HERMIT.Extras
   ( -- * Misc
     Unop, Binop
     -- * Core utilities
-  , isType, exprType', pairTy
+  , isType, exprType',exprTypeT, pairTy
   , tcFind0, tcFind, tcFind2
   , tcApp0, tcApp1, tcApp2
   , isPairTC, isPairTy, isEitherTy, isUnitTy, isBoolTy
   , unliftedType
-  , apps, apps', callSplitT, callNameSplitT, unCall, unCall1
+  , apps, apps', apps1', callSplitT, callNameSplitT, unCall, unCall1
   , collectForalls, subst, isTyLam, setNominalRole_maybe
   , isVarT, isLitT
     -- * HERMIT utilities
+  , newIdT
   , liftedKind, unliftedKind
-  , ReExpr, ReCore, FilterC, FilterE, OkCM, TransformU, findTyConT, isTypeE
+  , ReType, ReExpr, ReCore, FilterC, FilterE, FilterTy, OkCM, TransformU
+  , findTyConT, isTypeE, tyConApp1T
   , mkUnit, mkPair, mkLeft, mkRight, mkEither
   , InCoreTC
   , Observing, observeR', tries, triesL, labeled, labeledR
   , lintExprR -- , lintExprDieR
   , lintingExprR
-  , varLitE, uqVarName, typeEtaLong, simplifyE
+  , varLitE, uqVarName, fqVarName, typeEtaLong, simplifyE
   , anytdE, anybuE, inAppTys , isAppTy
   , letFloatToProg
   , concatProgs
@@ -49,23 +51,29 @@ module HERMIT.Extras
   , showPprT
   , externC', externC
   , unJustT, tcViewT, unFunCo
-  , lamFloatCastR, castCastR, unCastCastR, castFloatAppR'
+  , lamFloatCastR, castCastR, unCastCastR, castFloatAppR', castFloatCaseR, caseFloatR'
   , caseWildR
-  , bashExtendedWithE
+  , bashExtendedWithE, bashUsingE
+  , buildDictionaryT'
   , CustomC(..), TransformC, RewriteC,onHermitC, projectHermitC, debugR -- , liftCustomC
   , repeatN
+  , dumpStashR, dropStashedLetR
+  -- , progRhsR, dropLetPred -- REMOVE
   ) where
 
 import Prelude hiding (id,(.))
 
 import Control.Category (Category(..),(>>>))
 import Data.Functor ((<$>),(<$))
+import Data.Foldable (foldMap)
 import Control.Applicative (Applicative(..))
 import Control.Arrow (Arrow(..))
 import Data.List (intercalate)
 import Text.Printf (printf)
 import Data.Typeable (Typeable)
 import Control.Monad.IO.Class (MonadIO)
+import Data.Map (Map)
+import qualified Data.Map as Map
 
 -- GHC
 import Unique(hasKey)
@@ -76,8 +84,10 @@ import SimplCore (simplifyExpr)
 import qualified Coercion
 
 -- import Language.KURE.Transform (apply)
-import HERMIT.Core (CoreProg(..),Crumb,bindsToProg,progToBinds,exprAlphaEq)
-import HERMIT.Monad (HermitM,HasModGuts(..),HasHscEnv(..),newIdH)
+import HERMIT.Core
+  ( CoreProg(..),Crumb,bindsToProg,progToBinds
+  , exprAlphaEq,defToIdExpr )
+import HERMIT.Monad (HermitM,HasModGuts(..),HasHscEnv(..),newIdH,Label,getStash)
 import HERMIT.Context
   ( BoundVars(..),AddBindings(..),ReadBindings(..)
   , HasEmptyContext(..), HasCoreRules(..)
@@ -85,8 +95,10 @@ import HERMIT.Context
 -- Note that HERMIT.Dictionary re-exports HERMIT.Dictionary.*
 import HERMIT.Dictionary
   ( findIdT, callT, callNameT, simplifyR, letFloatTopR
-  , observeR, bracketR, bashExtendedWithR, bashR, wrongExprForm
-  , castFloatAppR, unshadowR, lintExprT
+  , observeR, bracketR, bashExtendedWithR, bashUsingR, bashR, wrongExprForm
+  , castFloatAppR
+  , caseFloatCastR, caseFloatCaseR, caseFloatAppR, caseFloatLetR
+  , unshadowR, lintExprT, buildDictionaryT, inScope
 #ifdef WatchFailures
   , traceR
 #endif
@@ -132,6 +144,13 @@ tyArity = length . fst . splitForAllTys . varType
 exprType' :: CoreExpr -> Type
 exprType' (Type {}) = error "exprType': given a Type"
 exprType' e         = exprType e
+
+-- Like 'exprType', but fails if given a type.
+exprTypeT :: Monad m => Transform c m CoreExpr Type
+exprTypeT =
+  do e <- idR
+     guardMsg (not (isType e)) "exprTypeT: given a Type"
+     return (exprType e)
 
 isType :: CoreExpr -> Bool
 isType (Type {}) = True
@@ -256,6 +275,10 @@ setNominalRole_maybe _ = Nothing
     HERMIT utilities
 --------------------------------------------------------------------}
 
+newIdT :: String -> TransformM c Type Id
+newIdT nm = do ty <- id
+               constT (newIdH nm ty)
+
 -- Common context & monad constraints
 -- type OkCM c m =
 --   ( HasDynFlags m, Functor m, MonadThings m, MonadCatch m
@@ -274,6 +297,11 @@ type RewriteM c a = TransformM c a a
 apps' :: String -> [Type] -> [CoreExpr] -> TransformU CoreExpr
 apps' s ts es = (\ i -> apps i ts es) <$> findIdT s
 
+-- Apply a named id to type and value arguments.
+apps1' :: String -> [Type] -> CoreExpr -> TransformU CoreExpr
+apps1' s ts = apps' s ts . (:[])
+
+type ReType = RewriteC Type
 type ReExpr = RewriteC CoreExpr
 type ReCore = RewriteC Core
 
@@ -390,7 +418,8 @@ labeled observing (label,r) =
 
 lintExprR :: (Functor m, Monad m, HasDynFlags m, BoundVars c) =>
              Rewrite c m CoreExpr
-lintExprR = (id &&& lintExprT) >>> arr fst
+-- lintExprR = (id &&& lintExprT) >>> arr fst
+lintExprR = lintExprT >> id
 
 #if 0
 -- lintExprR = ifM (True <$ lintExprT) id (fail "lint failure")
@@ -412,14 +441,15 @@ lintingExprR :: ( ReadBindings c, ReadCrumb c
                 String -> Unop (Rewrite c HermitM CoreExpr)
 lintingExprR msg rr =
   do e  <- idR
-     e' <- rr
+     e' <- rr'
      res <- attemptM (return e' >>> lintExprT)
      either (\ lintMsg -> return e >>>
-                          extractR (tryR unshadowR) >>> -- TEMP
-                          bracketR msg rr >>>
+                          bracketR msg rr' >>>
                           error lintMsg)
             (const (return e'))
             res
+ where
+   rr' = rr >>> extractR (tryR unshadowR)
 
 -- TODO: Eliminate labeled.
 
@@ -436,6 +466,9 @@ varLitE = Lit . mkMachString . uqVarName
 
 uqVarName :: Var -> String
 uqVarName = uqName . varName
+
+fqVarName :: Var -> String
+fqVarName = fqName . varName
 
 -- Fully type-eta-expand, i.e., ensure that every leading forall has a matching
 -- (type) lambdas.
@@ -509,13 +542,18 @@ simplifyExprR =
         do dflags <- getDynFlags
            liftIO $ simplifyExpr dflags e
 
--- TODO: An EQ-like type class for comparisons.
+-- TODO: Try exprSyntaxEq from HERMIT.Core:
+-- 
+-- exprSyntaxEq :: CoreExpr -> CoreExpr -> Bool
+
+-- TODO: Maybe an EQ-like type class for comparisons.
 
 -- | Get a GHC pretty-printing
-showPprT :: (HasDynFlags m, Outputable x, Monad m) =>
-            x -> Transform c m a String
-showPprT x = do dynFlags <- constT getDynFlags
-                return (showPpr dynFlags x)
+showPprT :: (HasDynFlags m, Outputable a, Monad m) =>
+            Transform c m a String
+showPprT = do a <- id
+              dynFlags <- constT getDynFlags
+              return (showPpr dynFlags a)
 
 #if 0
 externC :: forall c m a.
@@ -581,11 +619,23 @@ unCastCastR = do e `Cast` (co1 `TransCo` co2) <- idR
 -- Like 'castFloatAppR', but handles transitivy coercions.
 castFloatAppR' :: (MonadCatch m, ExtendCrumb c) =>
                   Rewrite c m CoreExpr
+castFloatAppR' = castFloatAppR <+
+                 (appAllR unCastCastR id >>> castFloatAppR')
 
--- castFloatAppR' = castFloatAppR <+
---                  (appAllR unCastCastR id >>> castFloatAppR)
+-- | case e of p -> (rhs `cast` co)  ==> (case e of p -> rhs) `cast` co
+-- Inverse to 'caseFloatCastR', so don't use both rules!
+castFloatCaseR :: ReExpr
+castFloatCaseR =
+  do Case scrut wild _ [(con,binds,rhs `Cast` co)] <- id
+     return $
+       Case scrut wild (pFst (coercionKind co)) [(con,binds,rhs)]
+         `Cast` co
 
-castFloatAppR' = tryR (appAllR unCastCastR id) >>> castFloatAppR
+-- | Like caseFloatR, but excludes caseFloatCastR, so we can use castFloatCaseR
+--   Note: does NOT include caseFloatArg
+caseFloatR' :: (ExtendCrumb c, ReadCrumb c, AddBindings c, ReadBindings c) => Rewrite c HermitM CoreExpr
+caseFloatR' = setFailMsg "Unsuitable expression for Case floating." $
+  caseFloatAppR <+ caseFloatCaseR <+ caseFloatLetR
 
 -- | case scrut of wild t { _ -> body }
 --    ==> let wild = scrut in body
@@ -597,19 +647,39 @@ caseWildR = labeledR "reifyCaseWild" $
      return $ Let (NonRec wild scrut) body
 
 
--- | Like bashExtendedWith, but for expressions
+-- | Like bashExtendedWithR, but for expressions
 bashExtendedWithE :: [ReExpr] -> ReExpr
 bashExtendedWithE rs = extractR (bashExtendedWithR (promoteR <$> rs))
+
+-- | Like bashUsingR, but for expressions
+bashUsingE :: [ReExpr] -> ReExpr
+bashUsingE rs = extractR (bashUsingR (promoteR <$> rs))
 
 -- -- | bashE for expressions
 -- bashE :: ReExpr
 -- bashE = extractR bashR
 
 type FilterC a = TransformC a ()
-type FilterE = FilterC CoreExpr
+type FilterE   = FilterC CoreExpr
+type FilterTy  = FilterC Type
 
 isTypeE :: FilterE
 isTypeE = typeT successT
+
+-- | Like tyConAppT, but for single type argument.
+tyConApp1T :: (ExtendCrumb c, Monad m) =>
+              Transform c m TyCon a -> Transform c m KindOrType b -> (a -> b -> z)
+           -> Transform c m Type z
+tyConApp1T ra rb h =
+  do TyConApp _ [_] <- id
+     tyConAppT ra (const rb) (\ a [b] -> h a b)
+
+-- | Like 'buildDictionaryT' but uses 'lintExprT' to reject bogus dictionaries.
+-- TODO: investigate and fix 'buildDictionaryT' instead.
+
+buildDictionaryT' :: TransformC Type CoreExpr
+buildDictionaryT' = setFailMsg "Couldn't build dictionary" $
+                    tryR simplifyE . lintExprR . buildDictionaryT
 
 {--------------------------------------------------------------------
     
@@ -673,3 +743,70 @@ debugR b = liftContext (CustomC b)
 -- | Repeat a rewriter exactly @n@ times.
 repeatN :: Monad m => Int -> Unop (Rewrite c m a)
 repeatN n = serialise . replicate n
+
+-- | Dump the stash of definitions.
+dumpStashR :: RewriteC CoreProg
+dumpStashR = do stashed <- stashIdMapT
+                already <- arr progBound
+                let new = Map.difference stashed already
+                arr (\ prog -> foldr add prog (Map.toList new))
+                  >>> progRhsR (dropLets new)
+              -- Alternative, move outside and use full stash
+              -- >>> tryR (progRhsR dropStashedLetR)
+ where
+   add (v,rhs) = ProgCons (NonRec v rhs)
+
+-- We only remove let bindings from the top-level of a definition.
+-- They get floated there.
+-- TODO: Drop unused stashed bindings.
+
+-- dropStashedLetR :: ReExpr
+-- dropStashedLetR = stashIdMapT >>= dropLets
+
+progRhsR :: ReExpr -> RewriteC CoreProg
+progRhsR r = progBindsAnyR (const (nonRecOrRecAllR id r))
+ where
+   nonRecOrRecAllR p q =
+     recAllR (const (defAllR p q)) <+ nonRecAllR p q
+
+-- (anybuE (dropLets new))
+
+-- TODO: Handle recursive definition groups also.
+
+-- reifyProg = progBindsT (const (tryR reifyDef >>> letFloatToProg)) concatProgs
+-- progBindsAllR :: (ExtendPath c Crumb, ReadPath c Crumb, AddBindings c, MonadCatch m) => (Int -> Rewrite c m CoreBind) -> Rewrite c m CoreProg
+
+-- NOTE: I'm converting the stash from a map over Label to a map over Id.
+-- Look for a better way.
+
+progBound :: CoreProg -> Map Id CoreExpr
+progBound = foldMap bindNames . progToBinds
+ where
+   bindNames (NonRec v e) = Map.singleton v e
+   bindNames (Rec bs)     = Map.fromList bs
+
+stashIdMapT :: TransformM c a (Map Id CoreExpr)
+stashIdMapT =
+  (Map.fromList . Map.elems . fmap defToIdExpr) <$> constT getStash
+
+#if 1
+
+dropLets :: Monad m => Map Id CoreExpr -> Rewrite c m CoreExpr
+dropLets defs = dropLetPred (flip Map.member defs)
+
+dropLetPred :: Monad m => (Id -> Bool) -> Rewrite c m CoreExpr
+dropLetPred f =
+  do Let (NonRec v _) body <- id
+     guardMsg (f v) "dropLets: doesn't satisfy predicate"
+     return body
+
+#else
+-- | Drop a 'let' binding if the variable is already bound. Assumes that the
+-- outer matches the inner, but doesn't check. Useful with 'dumpStash'.
+dropRedundantLetR :: ReExpr
+dropRedundantLetR =
+  do Let (NonRec v _) body <- id
+     contextonlyT $ \ c ->
+       guardMsg (inScope c v) "dropRedundantLet: out of scope"
+     return body
+#endif
