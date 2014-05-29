@@ -53,7 +53,7 @@ module HERMIT.Extras
   , unJustT, tcViewT, unFunCo
   , lamFloatCastR, castCastR, unCastCastR, castFloatAppR', castFloatCaseR, caseFloatR'
   , caseWildR
-  , bashExtendedWithE, bashUsingE
+  , bashExtendedWithE, bashUsingE, bashE
   , buildDictionaryT'
   , CustomC(..), TransformC, RewriteC,onHermitC, projectHermitC, debugR -- , liftCustomC
   , repeatN
@@ -655,9 +655,9 @@ bashExtendedWithE rs = extractR (bashExtendedWithR (promoteR <$> rs))
 bashUsingE :: [ReExpr] -> ReExpr
 bashUsingE rs = extractR (bashUsingR (promoteR <$> rs))
 
--- -- | bashE for expressions
--- bashE :: ReExpr
--- bashE = extractR bashR
+-- | bashE for expressions
+bashE :: ReExpr
+bashE = extractR bashR
 
 type FilterC a = TransformC a ()
 type FilterE   = FilterC CoreExpr
@@ -679,7 +679,7 @@ tyConApp1T ra rb h =
 
 buildDictionaryT' :: TransformC Type CoreExpr
 buildDictionaryT' = setFailMsg "Couldn't build dictionary" $
-                    tryR simplifyE . lintExprR . buildDictionaryT
+                    tryR bashE . lintExprR . buildDictionaryT
 
 {--------------------------------------------------------------------
     
@@ -749,10 +749,9 @@ dumpStashR :: RewriteC CoreProg
 dumpStashR = do stashed <- stashIdMapT
                 already <- arr progBound
                 let new = Map.difference stashed already
-                arr (\ prog -> foldr add prog (Map.toList new))
-                  >>> progRhsR (dropLets new)
-              -- Alternative, move outside and use full stash
-              -- >>> tryR (progRhsR dropStashedLetR)
+                -- Drop these let bindings from program before extending.
+                progRhsR (anybuE (dropLets new))  -- or anytdR (repeat (dropLets new))
+                  >>> arr (\ prog -> foldr add prog (Map.toList new))
  where
    add (v,rhs) = ProgCons (NonRec v rhs)
 
@@ -760,8 +759,8 @@ dumpStashR = do stashed <- stashIdMapT
 -- They get floated there.
 -- TODO: Drop unused stashed bindings.
 
--- dropStashedLetR :: ReExpr
--- dropStashedLetR = stashIdMapT >>= dropLets
+dropStashedLetR :: ReExpr
+dropStashedLetR = stashIdMapT >>= dropLets
 
 progRhsR :: ReExpr -> RewriteC CoreProg
 progRhsR r = progBindsAnyR (const (nonRecOrRecAllR id r))
