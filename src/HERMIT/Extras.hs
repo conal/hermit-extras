@@ -55,10 +55,11 @@ module HERMIT.Extras
   , caseWildR
   , bashExtendedWithE, bashUsingE, bashE
   , buildDictionaryT'
-  , CustomC(..), TransformC, RewriteC,onHermitC, projectHermitC, debugR -- , liftCustomC
+  , CustomC(..), TransformM,RewriteM, TransformC,RewriteC, onHermitC, projectHermitC, debugR -- , liftCustomC
   , repeatN
-  , dumpStashR, dropStashedLetR
-  -- , progRhsR, dropLetPred -- REMOVE
+  , saveDefNoFloat, dumpStashR, dropStashedLetR
+  , progRhsAnyR -- , dropLetPred -- REMOVE
+  , ($*), pairT, listT, pairCastR
   ) where
 
 import Prelude hiding (id,(.))
@@ -66,7 +67,7 @@ import Prelude hiding (id,(.))
 import Control.Category (Category(..),(>>>))
 import Data.Functor ((<$>),(<$))
 import Data.Foldable (foldMap)
-import Control.Applicative (Applicative(..))
+import Control.Applicative (Applicative(..),liftA2)
 import Control.Arrow (Arrow(..))
 import Data.List (intercalate)
 import Text.Printf (printf)
@@ -86,8 +87,8 @@ import qualified Coercion
 -- import Language.KURE.Transform (apply)
 import HERMIT.Core
   ( CoreProg(..),Crumb,bindsToProg,progToBinds
-  , exprAlphaEq,defToIdExpr )
-import HERMIT.Monad (HermitM,HasModGuts(..),HasHscEnv(..),newIdH,Label,getStash)
+  , exprAlphaEq,CoreDef(..),defToIdExpr )
+import HERMIT.Monad (HermitM,HasModGuts(..),HasHscEnv(..),newIdH,Label,saveDef,getStash)
 import HERMIT.Context
   ( BoundVars(..),AddBindings(..),ReadBindings(..)
   , HasEmptyContext(..), HasCoreRules(..)
@@ -744,13 +745,24 @@ debugR b = liftContext (CustomC b)
 repeatN :: Monad m => Int -> Unop (Rewrite c m a)
 repeatN n = serialise . replicate n
 
+-- | Use in a stashed 'Def' to say that we don't want to dump.
+bogusDefName :: String
+bogusDefName = "$bogus-def-name$"
+
+dropBogus :: Unop (Map Id CoreExpr)
+dropBogus = Map.filterWithKey (\ v _ -> uqVarName v /= bogusDefName)
+
+saveDefNoFloat :: String -> CoreExpr -> TransformM c a ()
+saveDefNoFloat lab e = do v <- newIdT bogusDefName $* exprType e
+                          constT (saveDef lab (Def v e))
+
 -- | Dump the stash of definitions.
 dumpStashR :: RewriteC CoreProg
 dumpStashR = do stashed <- stashIdMapT
                 already <- arr progBound
-                let new = Map.difference stashed already
+                let new = dropBogus (Map.difference stashed already)
                 -- Drop these let bindings from program before extending.
-                progRhsR (anybuE (dropLets new))  -- or anytdR (repeat (dropLets new))
+                progRhsAnyR (anybuE (dropLets new))  -- or anytdR (repeat (dropLets new))
                   >>> arr (\ prog -> foldr add prog (Map.toList new))
  where
    add (v,rhs) = ProgCons (NonRec v rhs)
@@ -762,8 +774,9 @@ dumpStashR = do stashed <- stashIdMapT
 dropStashedLetR :: ReExpr
 dropStashedLetR = stashIdMapT >>= dropLets
 
-progRhsR :: ReExpr -> RewriteC CoreProg
-progRhsR r = progBindsAnyR (const (nonRecOrRecAllR id r))
+-- Rewrite the right-hand sides of top-level definitions
+progRhsAnyR :: ReExpr -> RewriteC CoreProg
+progRhsAnyR r = progBindsAnyR (const (nonRecOrRecAllR id r))
  where
    nonRecOrRecAllR p q =
      recAllR (const (defAllR p q)) <+ nonRecAllR p q
@@ -809,3 +822,35 @@ dropRedundantLetR =
        guardMsg (inScope c v) "dropRedundantLet: out of scope"
      return body
 #endif
+
+-- Experimental utilities
+
+infixr 8 $*
+($*) :: Monad m => Transform c m a b -> a -> Transform c m q b
+t $* x = t . return x
+
+pairT :: ReExpr -> ReExpr -> ReExpr
+pairT ra rb =
+  do [_,_,a,b] <- snd <$> callNameT "GHC.Tuple.(,)"
+     liftA2 pair (ra $* a) (rb $* b)
+ where
+   pair x y = mkCoreTup [x,y]
+
+listT :: Monad m => [Transform c m a b] -> Transform c m [a] [b]
+listT rs =
+  do es <- id
+     guardMsg (length rs == length es) "listT: length mismatch"
+     sequence (zipWith ($*) rs es)
+
+-- | (,) ta' tb' (a `cast` coa) (b `cast` cob)  ==>
+--   (,) ta tb a b `cast` coab
+--  where `coa :: ta ~R ta'`, `cob :: tb ~R tb'`, and
+--  `coab :: (ta,tb) ~R (ta',tb')`.
+pairCastR :: ReExpr
+pairCastR =
+  do [_,_,Cast a coa,Cast b cob] <- snd <$> callNameT "GHC.Tuple.(,)"
+     return $
+       Cast (mkCoreTup [a,b])
+            (mkTyConAppCo Representational pairTyCon [coa,cob])
+
+-- TODO: Do I always want Representational here?
