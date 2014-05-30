@@ -43,12 +43,12 @@ module HERMIT.Extras
   , lintExprR -- , lintExprDieR
   , lintingExprR
   , varLitE, uqVarName, fqVarName, typeEtaLong, simplifyE
-  , anytdE, anybuE, inAppTys , isAppTy
+  , anytdE, anybuE, inAppTys, isAppTy, inlineWorkerR
   , letFloatToProg
   , concatProgs
   , rejectR , rejectTypeR
   , simplifyExprR, whenChangedR
-  , showPprT
+  , showPprT, stashLabel, findDef
   , unJustT, tcViewT, unFunCo
   , lamFloatCastR, castCastR, unCastCastR, castFloatAppR', castFloatCaseR, caseFloatR'
   , caseWildR
@@ -69,12 +69,13 @@ import Data.Functor ((<$>),(<$))
 import Data.Foldable (foldMap)
 import Control.Applicative (Applicative(..),liftA2)
 import Control.Arrow (Arrow(..))
-import Data.List (intercalate)
+import Data.List (intercalate,isPrefixOf)
 import Text.Printf (printf)
 import Data.Typeable (Typeable)
 import Control.Monad.IO.Class (MonadIO)
 import Data.Map (Map)
 import qualified Data.Map as Map
+import Data.Char (isUpper)
 
 -- GHC
 import Unique(hasKey)
@@ -88,7 +89,8 @@ import qualified Coercion
 import HERMIT.Core
   ( CoreProg(..),Crumb,bindsToProg,progToBinds
   , exprAlphaEq,CoreDef(..),defToIdExpr )
-import HERMIT.Monad (HermitM,HasModGuts(..),HasHscEnv(..),newIdH,Label,saveDef,getStash)
+import HERMIT.Monad
+  (HermitM,HasModGuts(..),HasHscEnv(..),newIdH,Label,saveDef,lookupDef,getStash)
 import HERMIT.Context
   ( BoundVars(..),AddBindings(..),ReadBindings(..)
   , HasEmptyContext(..), HasCoreRules(..)
@@ -99,7 +101,7 @@ import HERMIT.Dictionary
   , observeR, bracketR, bashExtendedWithR, bashUsingR, bashR, wrongExprForm
   , castFloatAppR
   , caseFloatCastR, caseFloatCaseR, caseFloatAppR, caseFloatLetR
-  , unshadowR, lintExprT, buildDictionaryT, inScope
+  , unshadowR, lintExprT, buildDictionaryT, inScope, inlineR
 #ifdef WatchFailures
   , traceR
 #endif
@@ -496,6 +498,16 @@ anybuE r = extractR (anybuR (promoteR r :: ReCore))
 -- TODO: Try rewriting more gracefully, testing isForAllTy first and
 -- maybeEtaExpandR
 
+isWorkerT :: FilterE
+isWorkerT = do Var (isWorker -> True) <- id
+               return ()
+
+isWorker :: Id -> Bool
+isWorker = ("$W" `isPrefixOf`) . uqVarName
+
+inlineWorkerR :: ReExpr
+inlineWorkerR = isWorkerT >> inlineR
+
 -- Apply a rewriter inside type lambdas.
 inAppTys :: Unop ReExpr
 inAppTys r = r'
@@ -555,6 +567,23 @@ showPprT :: (HasDynFlags m, Outputable a, Monad m) =>
 showPprT = do a <- id
               dynFlags <- constT getDynFlags
               return (showPpr dynFlags a)
+
+-- | Make a stash label out of an outputtable
+stashLabel :: (Functor m, Monad m, HasDynFlags m, Outputable a) =>
+              Transform c m a String
+stashLabel = tweakName <$> showPprT
+
+tweakName :: Unop String
+tweakName = intercalate "_" . map dropModules . words
+ where
+   dropModules (c:rest) | not (isUpper c) = c : dropModules rest
+   dropModules (break (== '.') -> (_,'.':rest)) = dropModules rest
+   dropModules s = s
+
+findDef :: Label -> TransformM c a CoreExpr
+findDef lab = constT (defExpr <$> lookupDef lab)
+ where
+   defExpr (Def _ expr) = expr
 
 -- | unJust as transform. Fails on Nothing.
 -- Already in Kure?
