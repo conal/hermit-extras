@@ -3,6 +3,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE DeriveDataTypeable, TypeFamilies #-}
 {-# LANGUAGE UndecidableInstances #-} -- see below
+{-# LANGUAGE BangPatterns #-}
 {-# OPTIONS_GHC -Wall #-}
 
 {-# OPTIONS_GHC -fno-warn-unused-imports #-} -- TEMP
@@ -32,6 +33,7 @@ module HERMIT.Extras
   , apps, apps', apps1', callSplitT, callNameSplitT, unCall, unCall1
   , collectForalls, subst, isTyLam, setNominalRole_maybe
   , isVarT, isLitT
+  , repr, varOccCount
     -- * HERMIT utilities
   , newIdT
   , liftedKind, unliftedKind
@@ -50,7 +52,7 @@ module HERMIT.Extras
   , simplifyExprR, whenChangedR
   , showPprT, stashLabel, findDef
   , unJustT, tcViewT, unFunCo
-  , lamFloatCastR, castCastR, unCastCastR, castFloatAppR', castFloatCaseR, caseFloatR'
+  , lamFloatCastR, castFloatLamR, castCastR, unCastCastR, castFloatAppR', castFloatCaseR, caseFloatR'
   , caseWildR
   , bashExtendedWithE, bashUsingE, bashE
   , buildDictionaryT'
@@ -102,9 +104,7 @@ import HERMIT.Dictionary
   , castFloatAppR
   , caseFloatCastR, caseFloatCaseR, caseFloatAppR, caseFloatLetR
   , unshadowR, lintExprT, buildDictionaryT, inScope, inlineR
-#ifdef WatchFailures
   , traceR
-#endif
   )
 -- import HERMIT.Dictionary (traceR)
 import HERMIT.GHC hiding (FastString(..))
@@ -240,6 +240,28 @@ isLitT :: (Monad m, ExtendCrumb c) =>
 isLitT = litT successT
 
 #if __GLASGOW_HASKELL__ < 709
+
+-- | Abbreviation for the 'Representational' role
+repr :: Role
+repr = Representational
+
+-- | Number of occurrences of a non-type variable
+varOccCount :: Var -> CoreExpr -> Int
+varOccCount v = occs 0
+ where
+   occs !n (Var u) | u == v = n+1
+   occs !n (App p q)        = occs (occs n p) q
+   occs !n (Lam _ e)        = occs n e  -- assumes no shadowning
+   occs !n (Cast e _)       = occs n e
+   occs !n (Tick _ e)       = occs n e
+   occs !n _                = n
+
+-- -- | If all occurrences of a given variable have the same cast wrapped around
+-- -- it, yield the coercion.
+-- allOccsCast :: Var -> CoreExpr -> Maybe Coercion
+-- allOccsCast v = occs Nothing
+--  where
+--    occs :: CoreExpr -> Unop (Maybe Coercion)
 
 {--------------------------------------------------------------------
     Borrowed from GHC HEAD >= 7.9
@@ -580,8 +602,9 @@ tweakName = intercalate "_" . map dropModules . words
    dropModules (break (== '.') -> (_,'.':rest)) = dropModules rest
    dropModules s = s
 
-findDef :: Label -> TransformM c a CoreExpr
-findDef lab = constT (defExpr <$> lookupDef lab)
+findDef :: Observing -> Label -> TransformM c a CoreExpr
+findDef brag lab = constT (defExpr <$> lookupDef lab)
+                     >>> (if brag then traceR ("memo hit on " ++ lab) else idR)
  where
    defExpr (Def _ expr) = expr
 
@@ -604,6 +627,7 @@ unFunCo _ = Nothing
 -- | cast (\ v -> e) (domCo -> ranCo)
 --     ==> (\ v' -> cast (e[Var v <- cast (Var v') (SymCo domCo)]) ranCo)
 -- where v' :: a' if the whole expression had type a' -> b'.
+-- Warning, to avoid looping, don't combine with 'castFloatLamR'.
 lamFloatCastR :: ReExpr
 lamFloatCastR = -- labelR "lamFloatCastR" $
   do Cast (Lam v e) (unFunCo -> Just (_,domCo,ranCo)) <- idR
@@ -611,6 +635,14 @@ lamFloatCastR = -- labelR "lamFloatCastR" $
      v' <- constT $ newIdH (uqVarName v) domTy
      let e' = subst [(v, Cast (Var v') (SymCo domCo))] e
      return (Lam v' (Cast e' ranCo))
+
+-- | (\ x :: a -> u `cast` co)  ==>  (\ x -> u) `cast` (<a> -> co)
+-- Warning, to avoid looping, don't combine with 'lamFloatCastR'.
+castFloatLamR :: ReExpr
+castFloatLamR =
+  do Lam x (u `Cast` co) <- id
+     return $
+       Lam x u `mkCast` (mkFunCo repr (mkReflCo repr (varType x)) co)
 
 -- TODO: Should I check the role?
 
@@ -794,18 +826,38 @@ listT rs =
      guardMsg (length rs == length es) "listT: length mismatch"
      sequence (zipWith ($*) rs es)
 
+unPairR :: (Functor m, MonadCatch m) =>
+           Transform c m CoreExpr (CoreExpr,CoreExpr)
+unPairR = do [_,_,a,b] <- snd <$> callNameT "GHC.Tuple.(,)"
+             return (a,b)
+
 -- | (,) ta' tb' (a `cast` coa) (b `cast` cob)  ==>
 --   (,) ta tb a b `cast` coab
 --  where `coa :: ta ~R ta'`, `cob :: tb ~R tb'`, and
 --  `coab :: (ta,tb) ~R (ta',tb')`.
 pairCastR :: ReExpr
 pairCastR =
-  do [_,_,Cast a coa,Cast b cob] <- snd <$> callNameT "GHC.Tuple.(,)"
-     return $
-       Cast (mkCoreTup [a,b])
-            (mkTyConAppCo Representational pairTyCon [coa,cob])
+  do ab' <- unPairR
+     case ab' of
+       (Cast a coa,Cast b cob) ->
+         return $
+           Cast (mkCoreTup [a,b])
+                (mkTyConAppCo repr pairTyCon [coa,cob])
+       (a,Cast b cob) ->
+         return $
+           Cast (mkCoreTup [a,b])
+                (mkTyConAppCo repr pairTyCon [refl a,cob])
+       (Cast a coa,b) ->
+         return $
+           Cast (mkCoreTup [a,b])
+                (mkTyConAppCo repr pairTyCon [coa,refl b])
+       _ -> fail "pairCastR: pair of non-casts"
+ where
+   refl = mkReflCo repr . exprType
 
--- TODO: Do I always want Representational here?
+-- TODO: Refactor
+
+-- TODO: Do I always want repr here?
 
 externC :: (Injection a Core) =>
            ExternalName -> RewriteH a -> String -> External
