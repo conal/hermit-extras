@@ -35,11 +35,11 @@ module HERMIT.Extras
     -- * HERMIT utilities
   , newIdT
   , liftedKind, unliftedKind
-  , ReType, ReExpr, ReCore, FilterC, FilterE, FilterTy, OkCM, TransformU
+  , ReType, ReExpr, ReCore, FilterH, FilterE, FilterTy, OkCM, TransformU
   , findTyConT, isTypeE, tyConApp1T
   , mkUnit, mkPair, mkLeft, mkRight, mkEither
   , InCoreTC
-  , Observing, observeR', tries, triesL, labeled, labeledR
+  , Observing, observeR', tries, triesL, labeled
   , lintExprR -- , lintExprDieR
   , lintingExprR
   , varLitE, uqVarName, fqVarName, typeEtaLong, simplifyE
@@ -49,17 +49,17 @@ module HERMIT.Extras
   , rejectR , rejectTypeR
   , simplifyExprR, whenChangedR
   , showPprT
-  , externC', externC
   , unJustT, tcViewT, unFunCo
   , lamFloatCastR, castCastR, unCastCastR, castFloatAppR', castFloatCaseR, caseFloatR'
   , caseWildR
   , bashExtendedWithE, bashUsingE, bashE
   , buildDictionaryT'
-  , CustomC(..), TransformM,RewriteM, TransformC,RewriteC, onHermitC, projectHermitC, debugR -- , liftCustomC
+  , TransformM, RewriteM
   , repeatN
   , saveDefNoFloat, dumpStashR, dropStashedLetR
   , progRhsAnyR -- , dropLetPred -- REMOVE
   , ($*), pairT, listT, pairCastR
+  , externC
   ) where
 
 import Prelude hiding (id,(.))
@@ -302,9 +302,9 @@ apps' s ts es = (\ i -> apps i ts es) <$> findIdT s
 apps1' :: String -> [Type] -> CoreExpr -> TransformU CoreExpr
 apps1' s ts = apps' s ts . (:[])
 
-type ReType = RewriteC Type
-type ReExpr = RewriteC CoreExpr
-type ReCore = RewriteC Core
+type ReType = RewriteH Type
+type ReExpr = RewriteH CoreExpr
+type ReCore = RewriteH Core
 
 -- | Lookup the name in the context first, then, failing that, in GHC's global
 -- reader environment.
@@ -454,10 +454,10 @@ lintingExprR msg rr =
 
 -- TODO: Eliminate labeled.
 
-labeledR :: InCoreTC a => String -> Unop (RewriteC a)
-labeledR label r =
-  do c <- contextT
-     labeled (cDebugFlag c) (label,r)
+-- labeledR' :: InCoreTC a => Bool -> String -> Unop (RewriteH a)
+-- labeledR' debug label r =
+--   do c <- contextT
+--      labeled debug (label,r)
 
 -- mkVarName :: MonadThings m => Transform c m Var (CoreExpr,Type)
 -- mkVarName = contextfreeT (mkStringExpr . uqName . varName) &&& arr varType
@@ -556,26 +556,6 @@ showPprT = do a <- id
               dynFlags <- constT getDynFlags
               return (showPpr dynFlags a)
 
-#if 0
-externC :: forall c m a.
-           (Monad m, Injection a Core, Extern (Rewrite c m Core)) =>
-           ExternalName -> Rewrite c m a -> String -> External
-externC name rew help =
-  external name (promoteR rew :: Rewrite c m Core) [help]
-#endif
-
-externC' :: Injection a Core =>
-            Bool -> ExternalName -> RewriteC a -> String -> External
-externC' dbg name rew help =
-  external name (promoteR (debugR dbg rew) :: RewriteH Core) [help]
-
-externC :: Injection a Core =>
-           ExternalName -> RewriteC a -> String -> External
-externC = externC' False
-
--- OOPS. Not what I want, since it turns on debugging when the command is
--- defined. I want to turn it on dynamically.
-
 -- | unJust as transform. Fails on Nothing.
 -- Already in Kure?
 unJustT :: Monad m => Transform c m (Maybe a) a
@@ -643,7 +623,7 @@ caseFloatR' = setFailMsg "Unsuitable expression for Case floating." $
 -- May be followed by let-elimination.
 -- Warning: does not capture GHC's intent to reduce scrut to WHNF.
 caseWildR :: ReExpr
-caseWildR = labeledR "reifyCaseWild" $
+caseWildR = -- labeledR "reifyCaseWild" $
   do Case scrut wild _bodyTy [(DEFAULT,[],body)] <- idR
      return $ Let (NonRec wild scrut) body
 
@@ -660,9 +640,9 @@ bashUsingE rs = extractR (bashUsingR (promoteR <$> rs))
 bashE :: ReExpr
 bashE = extractR bashR
 
-type FilterC a = TransformC a ()
-type FilterE   = FilterC CoreExpr
-type FilterTy  = FilterC Type
+type FilterH a = TransformH a ()
+type FilterE   = FilterH CoreExpr
+type FilterTy  = FilterH Type
 
 isTypeE :: FilterE
 isTypeE = typeT successT
@@ -678,66 +658,9 @@ tyConApp1T ra rb h =
 -- | Like 'buildDictionaryT' but uses 'lintExprT' to reject bogus dictionaries.
 -- TODO: investigate and fix 'buildDictionaryT' instead.
 
-buildDictionaryT' :: TransformC Type CoreExpr
+buildDictionaryT' :: TransformH Type CoreExpr
 buildDictionaryT' = setFailMsg "Couldn't build dictionary" $
                     tryR bashE . lintExprR . buildDictionaryT
-
-{--------------------------------------------------------------------
-    
---------------------------------------------------------------------}
-
--- Adapted from Andrew Farmer's code
--- <https://github.com/ku-fpg/hermit/issues/101#issuecomment-43463849>
-
-data CustomC = CustomC { cDebugFlag :: Bool, cHermitC :: HermitC }
-
-type TransformC a b = Transform CustomC HermitM a b
-type RewriteC a = TransformC a a
-
-onHermitC :: Unop HermitC -> Unop CustomC
-onHermitC f c = c { cHermitC = f (cHermitC c) }
-
-projectHermitC :: (HermitC -> a) -> (CustomC -> a)
-projectHermitC r c = r (cHermitC c)
-
-instance AddBindings CustomC where
-  addHermitBindings bs = onHermitC (addHermitBindings bs)
-
-instance BoundVars CustomC where
-  boundVars = projectHermitC boundVars
-
-instance ReadBindings CustomC where
-  hermitDepth    = projectHermitC hermitDepth
-  hermitBindings = projectHermitC hermitBindings
-
-instance HasCoreRules CustomC where
-    hermitCoreRules = projectHermitC hermitCoreRules
-
-instance HasEmptyContext CustomC where
-  setEmptyContext c =
-    c { cDebugFlag = False
-      , cHermitC = setEmptyContext (cHermitC c)
-      }
-
-instance ReadPath HermitC crumb => ReadPath CustomC crumb where
-  absPath = projectHermitC absPath
-
---     Constraint is no smaller than the instance head
---       in the constraint: ReadPath HermitC crumb
---     (Use UndecidableInstances to permit this)
-
-instance ExtendPath HermitC crumb => ExtendPath CustomC crumb where
-  c @@ crumb = onHermitC (@@ crumb) c
-
-data RewriteCCoreBox = RewriteCCoreBox (RewriteC Core) deriving Typeable
-
-instance Extern (RewriteC Core) where
-    type Box (RewriteC Core) = RewriteCCoreBox
-    box = RewriteCCoreBox
-    unbox (RewriteCCoreBox r) = r
-
-debugR :: Bool -> RewriteC b -> RewriteH b
-debugR b = liftContext (CustomC b)
 
 -- TODO: Can I eliminate the CustomC requirement in debugR?
 
@@ -757,7 +680,7 @@ saveDefNoFloat lab e = do v <- newIdT bogusDefName $* exprType e
                           constT (saveDef lab (Def v e))
 
 -- | Dump the stash of definitions.
-dumpStashR :: RewriteC CoreProg
+dumpStashR :: RewriteH CoreProg
 dumpStashR = do stashed <- stashIdMapT
                 already <- arr progBound
                 let new = dropBogus (Map.difference stashed already)
@@ -775,7 +698,7 @@ dropStashedLetR :: ReExpr
 dropStashedLetR = stashIdMapT >>= dropLets
 
 -- Rewrite the right-hand sides of top-level definitions
-progRhsAnyR :: ReExpr -> RewriteC CoreProg
+progRhsAnyR :: ReExpr -> RewriteH CoreProg
 progRhsAnyR r = progBindsAnyR (const (nonRecOrRecAllR id r))
  where
    nonRecOrRecAllR p q =
@@ -854,3 +777,8 @@ pairCastR =
             (mkTyConAppCo Representational pairTyCon [coa,cob])
 
 -- TODO: Do I always want Representational here?
+
+externC :: (Injection a Core) =>
+           ExternalName -> RewriteH a -> String -> External
+externC name rew help =
+  external name (promoteR rew :: RewriteH Core) [help]
