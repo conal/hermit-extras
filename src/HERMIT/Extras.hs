@@ -3,7 +3,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE DeriveDataTypeable, TypeFamilies #-}
 {-# LANGUAGE UndecidableInstances #-} -- see below
-{-# LANGUAGE BangPatterns #-}
+-- {-# LANGUAGE BangPatterns #-}
 {-# OPTIONS_GHC -Wall #-}
 
 {-# OPTIONS_GHC -fno-warn-unused-imports #-} -- TEMP
@@ -33,7 +33,7 @@ module HERMIT.Extras
   , apps, apps', apps1', callSplitT, callNameSplitT, unCall, unCall1
   , collectForalls, subst, isTyLam, setNominalRole_maybe
   , isVarT, isLitT
-  , repr, varOccCount
+  , repr, varOccCount, castOccsSame
     -- * HERMIT utilities
   , newIdT
   , liftedKind, unliftedKind
@@ -66,10 +66,11 @@ module HERMIT.Extras
 
 import Prelude hiding (id,(.))
 
+import Data.Monoid (Monoid(..))
 import Control.Category (Category(..),(>>>))
 import Data.Functor ((<$>),(<$))
 import Data.Foldable (foldMap)
-import Control.Applicative (Applicative(..),liftA2)
+import Control.Applicative (Applicative(..),liftA2,(<|>))
 import Control.Arrow (Arrow(..))
 import Data.List (intercalate,isPrefixOf)
 import Text.Printf (printf)
@@ -90,7 +91,7 @@ import qualified Coercion
 -- import Language.KURE.Transform (apply)
 import HERMIT.Core
   ( CoreProg(..),Crumb,bindsToProg,progToBinds
-  , exprAlphaEq,CoreDef(..),defToIdExpr )
+  , exprAlphaEq,CoreDef(..),defToIdExpr, coercionSyntaxEq )
 import HERMIT.Monad
   (HermitM,HasModGuts(..),HasHscEnv(..),newIdH,Label,saveDef,lookupDef,getStash)
 import HERMIT.Context
@@ -247,6 +248,22 @@ repr = Representational
 
 -- | Number of occurrences of a non-type variable
 varOccCount :: Var -> CoreExpr -> Int
+varOccCount v = flip occs 0
+ where
+   occs :: CoreExpr -> Unop Int
+   occs (Var u) | u == v = succ
+   occs (App p q)        = occs p . occs q
+   occs (Lam _ e)        = occs e  -- assumes no shadowning
+   occs (Cast e _)       = occs e
+   occs (Tick _ e)       = occs e
+   occs _                = id
+
+-- TODO: compare with the strict version below
+
+#if 0
+
+-- | Number of occurrences of a non-type variable
+varOccCount :: Var -> CoreExpr -> Int
 varOccCount v = occs 0
  where
    occs !n (Var u) | u == v = n+1
@@ -255,13 +272,39 @@ varOccCount v = occs 0
    occs !n (Cast e _)       = occs n e
    occs !n (Tick _ e)       = occs n e
    occs !n _                = n
+#endif
 
--- -- | If all occurrences of a given variable have the same cast wrapped around
--- -- it, yield the coercion.
--- allOccsCast :: Var -> CoreExpr -> Maybe Coercion
--- allOccsCast v = occs Nothing
---  where
---    occs :: CoreExpr -> Unop (Maybe Coercion)
+data VarCasts = NoCast | Casts Coercion | FailCast
+
+instance Monoid VarCasts where
+  mempty                        = NoCast
+  NoCast `mappend` c            = c
+  c `mappend` NoCast            = c
+  FailCast `mappend` _          = FailCast
+  _ `mappend` FailCast          = FailCast
+  Casts co `mappend` Casts co'
+    | co `coercionSyntaxEq` co' = Casts co
+    | otherwise                 = FailCast
+
+
+-- | See if the given variable occurs only with casts having the same coercion.
+-- If so, yield that coercion.
+castOccsSame :: Var -> CoreExpr -> Maybe Coercion
+castOccsSame v e =
+  case castOccsSame' v e of
+    Casts co -> Just co
+    _        -> Nothing
+
+castOccsSame' :: Var -> CoreExpr -> VarCasts
+castOccsSame' v = occ
+ where
+   occ :: CoreExpr -> VarCasts
+   occ (Cast (Var u) co) | u == v = Casts co
+   occ (App p q)        = occ p `mappend` occ q
+   occ (Lam _ e)        = occ e  -- assumes no shadowning
+   occ (Cast e _)       = occ e
+   occ (Tick _ e)       = occ e
+   occ _                = mempty
 
 {--------------------------------------------------------------------
     Borrowed from GHC HEAD >= 7.9
