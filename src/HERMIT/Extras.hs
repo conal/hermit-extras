@@ -297,17 +297,17 @@ castOccsSame' :: Var -> CoreExpr -> VarCasts
 castOccsSame' v = occs
  where
    occs                            :: CoreExpr -> VarCasts
-   occs (Cast (Var u) co) | u == v = Casts co
+   occs (Var _)                    = mempty
+   occs (Lit _)                    = mempty
    occs (App p q)                  = occs p <> occs q
    occs (Lam _ e)                  = occs e  -- assumes no shadowning
+   occs (Let b e)                  = bindOccs b <> occs e
    occs (Case e _ _ alts)          = occs e <> foldMap (altOccs) alts
+   occs (Cast (Var u) co) | u == v = Casts co
    occs (Cast e _)                 = occs e
    occs (Tick _ e)                 = occs e
-   occs (Let b e)                  = bindOccs b <> occs e
-   occs (Coercion _)               = mempty
-   occs (Lit _)                    = mempty
    occs (Type _)                   = mempty
-   occs (Var _)                    = mempty
+   occs (Coercion _)               = mempty
    altOccs (_,_,e)                 = occs e
    bindOccs (NonRec _ e)           = occs e
    bindOccs (Rec bs)               = foldMap (occs . snd) bs
