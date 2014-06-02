@@ -38,7 +38,7 @@ module HERMIT.Extras
   , newIdT
   , liftedKind, unliftedKind
   , ReType, ReExpr, ReCore, FilterH, FilterE, FilterTy, OkCM, TransformU
-  , findTyConT, isTypeE, tyConApp1T
+  , findTyConT, isTypeE, isDictE, tyConApp1T
   , mkUnit, mkPair, mkLeft, mkRight, mkEither
   , InCoreTC
   , Observing, observeR', tries, triesL, labeled
@@ -66,7 +66,7 @@ module HERMIT.Extras
 
 import Prelude hiding (id,(.))
 
-import Data.Monoid (Monoid(..))
+import Data.Monoid (Monoid(..),(<>))
 import Control.Category (Category(..),(>>>))
 import Data.Functor ((<$>),(<$))
 import Data.Foldable (foldMap)
@@ -108,7 +108,7 @@ import HERMIT.Dictionary
   , traceR
   )
 -- import HERMIT.Dictionary (traceR)
-import HERMIT.GHC hiding (FastString(..))
+import HERMIT.GHC hiding (FastString(..),(<>))
 import HERMIT.Kure hiding (apply)
 import HERMIT.External (External,Extern(..),external,ExternalName)
 
@@ -261,7 +261,6 @@ varOccCount v = flip occs 0
 -- TODO: compare with the strict version below
 
 #if 0
-
 -- | Number of occurrences of a non-type variable
 varOccCount :: Var -> CoreExpr -> Int
 varOccCount v = occs 0
@@ -277,15 +276,14 @@ varOccCount v = occs 0
 data VarCasts = NoCast | Casts Coercion | FailCast
 
 instance Monoid VarCasts where
-  mempty                        = NoCast
-  NoCast `mappend` c            = c
-  c `mappend` NoCast            = c
-  FailCast `mappend` _          = FailCast
-  _ `mappend` FailCast          = FailCast
+  mempty = NoCast
+  NoCast   `mappend` c        = c
+  c        `mappend` NoCast   = c
+  FailCast `mappend` _        = FailCast
+  _        `mappend` FailCast = FailCast
   Casts co `mappend` Casts co'
-    | co `coercionSyntaxEq` co' = Casts co
-    | otherwise                 = FailCast
-
+    | co `coreEqCoercion` co' = Casts co
+    | otherwise               = FailCast
 
 -- | See if the given variable occurs only with casts having the same coercion.
 -- If so, yield that coercion.
@@ -296,15 +294,23 @@ castOccsSame v e =
     _        -> Nothing
 
 castOccsSame' :: Var -> CoreExpr -> VarCasts
-castOccsSame' v = occ
+castOccsSame' v = occs
  where
-   occ :: CoreExpr -> VarCasts
-   occ (Cast (Var u) co) | u == v = Casts co
-   occ (App p q)        = occ p `mappend` occ q
-   occ (Lam _ e)        = occ e  -- assumes no shadowning
-   occ (Cast e _)       = occ e
-   occ (Tick _ e)       = occ e
-   occ _                = mempty
+   occs                            :: CoreExpr -> VarCasts
+   occs (Cast (Var u) co) | u == v = Casts co
+   occs (App p q)                  = occs p <> occs q
+   occs (Lam _ e)                  = occs e  -- assumes no shadowning
+   occs (Case e _ _ alts)          = occs e <> foldMap (altOccs) alts
+   occs (Cast e _)                 = occs e
+   occs (Tick _ e)                 = occs e
+   occs (Let b e)                  = bindOccs b <> occs e
+   occs (Coercion _)               = mempty
+   occs (Lit _)                    = mempty
+   occs (Type _)                   = mempty
+   occs (Var _)                    = mempty
+   altOccs (_,_,e)                 = occs e
+   bindOccs (NonRec _ e)           = occs e
+   bindOccs (Rec bs)               = foldMap (occs . snd) bs
 
 {--------------------------------------------------------------------
     Borrowed from GHC HEAD >= 7.9
@@ -748,8 +754,13 @@ type FilterH a = TransformH a ()
 type FilterE   = FilterH CoreExpr
 type FilterTy  = FilterH Type
 
+-- | Is the expression a type?
 isTypeE :: FilterE
 isTypeE = typeT successT
+
+-- | Is the expression a dictionary?
+isDictE :: FilterE
+isDictE = guardT . (isDictTy <$> exprTypeT)
 
 -- | Like tyConAppT, but for single type argument.
 tyConApp1T :: (ExtendCrumb c, Monad m) =>
