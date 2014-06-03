@@ -38,7 +38,7 @@ module HERMIT.Extras
   , newIdT
   , liftedKind, unliftedKind
   , ReType, ReExpr, ReCore, FilterH, FilterE, FilterTy, OkCM, TransformU
-  , findTyConT, isTypeE, isDictE, tyConApp1T
+  , findTyConT, isTypeE, isCastE, isDictE, tyConApp1T
   , mkUnit, mkPair, mkLeft, mkRight, mkEither
   , InCoreTC
   , Observing, observeR', tries, triesL, labeled
@@ -59,9 +59,10 @@ module HERMIT.Extras
   , TransformM, RewriteM
   , repeatN
   , saveDefNoFloat, dumpStashR, dropStashedLetR
-  , progRhsAnyR -- , dropLetPred -- REMOVE
-  , ($*), pairT, listT, pairCastR
+  , progRhsAnyR
+  , ($*), pairT, listT, unPairR
   , externC
+  , normaliseTypeT, normalizeTypeT
   ) where
 
 import Prelude hiding (id,(.))
@@ -86,12 +87,13 @@ import PrelNames (
   liftedTypeKindTyConKey,unliftedTypeKindTyConKey,constraintKindTyConKey,
   eitherTyConName)
 import SimplCore (simplifyExpr)
+import FamInstEnv (normaliseType)
 import qualified Coercion
 
 -- import Language.KURE.Transform (apply)
 import HERMIT.Core
   ( CoreProg(..),Crumb,bindsToProg,progToBinds
-  , exprAlphaEq,CoreDef(..),defToIdExpr, coercionSyntaxEq )
+  , exprSyntaxEq,CoreDef(..),defToIdExpr, coercionSyntaxEq )
 import HERMIT.Monad
   (HermitM,HasModGuts(..),HasHscEnv(..),newIdH,Label,saveDef,lookupDef,getStash)
 import HERMIT.Context
@@ -184,8 +186,10 @@ isEitherTy (TyConApp tc [_,_]) = tyConName tc == eitherTyConName
 isEitherTy _                   = False
 
 isUnitTy :: Type -> Bool
-isUnitTy (TyConApp tc []) = tc == unitTyCon
-isUnitTy _                = False
+isUnitTy (coreView -> Just t) = error "coreView succeeded" $
+                              isUnitTy t  -- experiment
+isUnitTy (TyConApp tc [])   = tc == unitTyCon
+isUnitTy _                  = False
 
 isBoolTy :: Type -> Bool
 isBoolTy (TyConApp tc []) = tc == boolTyCon
@@ -620,7 +624,7 @@ whenChangedR name eq r =
 -- gives false positives, which spoils its usefulness.
 simplifyExprR :: ReExpr
 simplifyExprR =
-  whenChangedR "simplify-expr" exprAlphaEq $
+  whenChangedR "simplify-expr" exprSyntaxEq $
     prefixFailMsg "simplify-expr failed: " $
       contextfreeT $ \ e ->
         do dflags <- getDynFlags
@@ -758,6 +762,10 @@ type FilterTy  = FilterH Type
 isTypeE :: FilterE
 isTypeE = typeT successT
 
+-- | Is the expression a cast?
+isCastE :: FilterE
+isCastE = castT id id mempty
+
 -- | Is the expression a dictionary?
 isDictE :: FilterE
 isDictE = guardT . (isDictTy <$> exprTypeT)
@@ -885,35 +893,21 @@ unPairR :: (Functor m, MonadCatch m) =>
 unPairR = do [_,_,a,b] <- snd <$> callNameT "GHC.Tuple.(,)"
              return (a,b)
 
--- | (,) ta' tb' (a `cast` coa) (b `cast` cob)  ==>
---   (,) ta tb a b `cast` coab
---  where `coa :: ta ~R ta'`, `cob :: tb ~R tb'`, and
---  `coab :: (ta,tb) ~R (ta',tb')`.
-pairCastR :: ReExpr
-pairCastR =
-  do ab' <- unPairR
-     case ab' of
-       (Cast a coa,Cast b cob) ->
-         return $
-           Cast (mkCoreTup [a,b])
-                (mkTyConAppCo repr pairTyCon [coa,cob])
-       (a,Cast b cob) ->
-         return $
-           Cast (mkCoreTup [a,b])
-                (mkTyConAppCo repr pairTyCon [refl a,cob])
-       (Cast a coa,b) ->
-         return $
-           Cast (mkCoreTup [a,b])
-                (mkTyConAppCo repr pairTyCon [coa,refl b])
-       _ -> fail "pairCastR: pair of non-casts"
- where
-   refl = mkReflCo repr . exprType
-
--- TODO: Refactor
-
--- TODO: Do I always want repr here?
-
 externC :: (Injection a Core) =>
            ExternalName -> RewriteH a -> String -> External
 externC name rew help =
   external name (promoteR rew :: RewriteH Core) [help]
+
+-- From Andrew Farmer
+normaliseTypeT :: (MonadIO m, HasModGuts m, HasHscEnv m) =>
+                  Role -> Transform c m Type (Coercion, Type)
+normaliseTypeT r = do
+  envs <- constT $ do
+    guts <- getModGuts
+    eps <- getHscEnv >>= liftIO . hscEPS 
+    return (eps_fam_inst_env eps, mg_fam_inst_env guts) 
+  arr (normaliseType envs r)
+
+normalizeTypeT :: (MonadIO m, HasModGuts m, HasHscEnv m) =>
+                  Role -> Transform c m Type (Coercion, Type)
+normalizeTypeT = normaliseTypeT
