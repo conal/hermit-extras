@@ -62,7 +62,7 @@ module HERMIT.Extras
   , progRhsAnyR
   , ($*), pairT, listT, unPairR
   , externC
-  , normaliseTypeT, normalizeTypeT
+  , normaliseTypeT, normalizeTypeT, optimizeCoercionR, optimizeCastR
   ) where
 
 import Prelude hiding (id,(.))
@@ -89,11 +89,12 @@ import PrelNames (
 import SimplCore (simplifyExpr)
 import FamInstEnv (normaliseType)
 import qualified Coercion
+import OptCoercion (optCoercion)
 
 -- import Language.KURE.Transform (apply)
 import HERMIT.Core
   ( CoreProg(..),Crumb,bindsToProg,progToBinds
-  , exprSyntaxEq,CoreDef(..),defToIdExpr, coercionSyntaxEq )
+  , exprSyntaxEq,CoreDef(..),defToIdExpr, coercionAlphaEq, coercionSyntaxEq )
 import HERMIT.Monad
   (HermitM,HasModGuts(..),HasHscEnv(..),newIdH,Label,saveDef,lookupDef,getStash)
 import HERMIT.Context
@@ -613,10 +614,11 @@ rejectTypeR f = rejectR (f . exprType)
 -- | Succeed only if the given rewrite actually changes the 
 whenChangedR :: String -> (a -> a -> Bool) -> Unop (RewriteM c a)
 whenChangedR name eq r =
-  do (e,e') <- (r &&& idR)
-     guardMsg (not (eq e e'))
+  do old <- id
+     new <- r
+     guardMsg (not (new `eq` old))
       (name ++ ": result is unchanged from input.")
-     return e'
+     return new
 
 -- TODO: Replace whenChangedR with changedByR from KURE.Combinators.Transform.
 
@@ -898,7 +900,8 @@ externC :: (Injection a Core) =>
 externC name rew help =
   external name (promoteR rew :: RewriteH Core) [help]
 
--- From Andrew Farmer
+-- Adapted from Andrew Farmer's code
+-- | Alias for 'normalizeTypeT'.
 normaliseTypeT :: (MonadIO m, HasModGuts m, HasHscEnv m) =>
                   Role -> Transform c m Type (Coercion, Type)
 normaliseTypeT r = do
@@ -906,8 +909,22 @@ normaliseTypeT r = do
     guts <- getModGuts
     eps <- getHscEnv >>= liftIO . hscEPS 
     return (eps_fam_inst_env eps, mg_fam_inst_env guts) 
-  arr (normaliseType envs r)
+  res@(co,_) <- arr (normaliseType envs r)
+  guardMsg (not (isReflCo co)) "normaliseTypeT: already normal"
+  return res
 
+-- | Normalize a type, giving coercion and result type.
+-- Fails if already normalized (rather than returning 'ReflCo').
 normalizeTypeT :: (MonadIO m, HasModGuts m, HasHscEnv m) =>
                   Role -> Transform c m Type (Coercion, Type)
 normalizeTypeT = normaliseTypeT
+
+-- | Optimize a coercion.
+optimizeCoercionR :: RewriteM c Coercion
+optimizeCoercionR =
+  whenChangedR "opt-coercion" coercionSyntaxEq $
+    arr (optCoercion emptyCvSubst)
+
+-- | Optimize a coercion.
+optimizeCastR :: ExtendCrumb c => RewriteM c CoreExpr
+optimizeCastR = castAllR id optimizeCoercionR
