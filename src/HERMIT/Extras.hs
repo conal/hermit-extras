@@ -187,10 +187,9 @@ isEitherTy (TyConApp tc [_,_]) = tyConName tc == eitherTyConName
 isEitherTy _                   = False
 
 isUnitTy :: Type -> Bool
-isUnitTy (coreView -> Just t) = error "coreView succeeded" $
-                              isUnitTy t  -- experiment
-isUnitTy (TyConApp tc [])   = tc == unitTyCon
-isUnitTy _                  = False
+isUnitTy (coreView -> Just t) = isUnitTy t  -- experiment
+isUnitTy (TyConApp tc [])     = tc == unitTyCon
+isUnitTy _                    = False
 
 isBoolTy :: Type -> Bool
 isBoolTy (TyConApp tc []) = tc == boolTyCon
@@ -435,7 +434,7 @@ unCall :: MonadCatch m =>
 unCall f = do (_f,_tys,args) <- callNameSplitT f
               return args
 
--- | Uncall a named function of one argument
+-- | Uncall a named function of one value argument, dropping initial type args.
 unCall1 :: String -> ReExpr
 unCall1 f = do [e] <- unCall f
                return e
@@ -925,6 +924,6 @@ optimizeCoercionR =
   whenChangedR "opt-coercion" coercionSyntaxEq $
     arr (optCoercion emptyCvSubst)
 
--- | Optimize a coercion.
+-- | Optimize a cast.
 optimizeCastR :: ExtendCrumb c => RewriteM c CoreExpr
 optimizeCastR = castAllR id optimizeCoercionR
