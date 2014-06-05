@@ -45,7 +45,8 @@ module HERMIT.Extras
   , lintExprR -- , lintExprDieR
   , lintingExprR
   , varLitE, uqVarName, fqVarName, typeEtaLong, simplifyE
-  , anytdE, anybuE, inAppTys, isAppTy, inlineWorkerR
+  , walkE , anytdE, anybuE, onetdE, onebuE
+  , inAppTys, isAppTy, inlineWorkerR
   , letFloatToProg
   , concatProgs
   , rejectR , rejectTypeR
@@ -252,17 +253,25 @@ repr = Representational
 
 -- | Number of occurrences of a non-type variable
 varOccCount :: Var -> CoreExpr -> Int
-varOccCount v = flip occs 0
+varOccCount v = occs
  where
-   occs :: CoreExpr -> Unop Int
-   occs (Var u) | u == v = succ
-   occs (App p q)        = occs p . occs q
-   occs (Lam _ e)        = occs e  -- assumes no shadowning
-   occs (Cast e _)       = occs e
-   occs (Tick _ e)       = occs e
-   occs _                = id
+   occs :: CoreExpr -> Int
+   occs (Var u) | u == v    = 1
+                | otherwise = 0
+   occs (Lit _)             = 0
+   occs (App p q)           = occs p + occs q
+   occs (Lam _ e)           = occs e  -- assumes no shadowning
+   occs (Let b e)           = bindOccs b + occs e
+   occs (Case e _ _ alts)   = occs e + sum (map altOccs alts)
+   occs (Cast e _)          = occs e
+   occs (Tick _ e)          = occs e
+   occs (Type _)            = 0
+   occs (Coercion _)        = 0
+   altOccs (_,_,e)          = occs e
+   bindOccs (NonRec _ e)    = occs e
+   bindOccs (Rec bs)        = sum (map (occs . snd) bs)
 
--- TODO: compare with the strict version below
+-- TODO: stricter version
 
 #if 0
 -- | Number of occurrences of a non-type variable
@@ -306,7 +315,7 @@ castOccsSame' v = occs
    occs (App p q)                  = occs p <> occs q
    occs (Lam _ e)                  = occs e  -- assumes no shadowning
    occs (Let b e)                  = bindOccs b <> occs e
-   occs (Case e _ _ alts)          = occs e <> foldMap (altOccs) alts
+   occs (Case e _ _ alts)          = occs e <> foldMap altOccs alts
    occs (Cast (Var u) co) | u == v = Casts co
    occs (Cast e _)                 = occs e
    occs (Tick _ e)                 = occs e
@@ -564,11 +573,14 @@ typeEtaLong = readerT $ \ e ->
 simplifyE :: ReExpr
 simplifyE = extractR simplifyR
 
-anytdE :: Unop ReExpr
-anytdE r = extractR (anytdR (promoteR r :: ReCore))
+walkE :: Unop ReCore -> Unop ReExpr
+walkE trav r = extractR (trav (promoteR r :: ReCore))
 
-anybuE :: Unop ReExpr
-anybuE r = extractR (anybuR (promoteR r :: ReCore))
+anytdE, anybuE, onetdE, onebuE :: Unop ReExpr
+anytdE = walkE anytdR
+anybuE = walkE anybuR
+onetdE = walkE onetdR
+onebuE = walkE onebuR
 
 -- TODO: Try rewriting more gracefully, testing isForAllTy first and
 -- maybeEtaExpandR
