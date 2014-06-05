@@ -37,7 +37,8 @@ module HERMIT.Extras
     -- * HERMIT utilities
   , newIdT
   , liftedKind, unliftedKind
-  , ReType, ReExpr, ReCore, FilterH, FilterE, FilterTy, OkCM, TransformU
+  , ReType, ReExpr, ReProg, ReCore
+  , FilterH, FilterE, FilterTy, OkCM, TransformU
   , findTyConT, isTypeE, isCastE, isDictE, tyConApp1T
   , mkUnit, mkPair, mkLeft, mkRight, mkEither
   , InCoreTC
@@ -51,7 +52,7 @@ module HERMIT.Extras
   , concatProgs
   , rejectR , rejectTypeR
   , simplifyExprR, whenChangedR
-  , showPprT, stashLabel, findDef
+  , showPprT, stashLabel, saveDefT, findDefT
   , unJustT, tcViewT, unFunCo
   , lamFloatCastR, castFloatLamR, castCastR, unCastCastR, castFloatAppR', castFloatCaseR, caseFloatR'
   , caseWildR
@@ -390,6 +391,7 @@ apps1' s ts = apps' s ts . (:[])
 
 type ReType = RewriteH Type
 type ReExpr = RewriteH CoreExpr
+type ReProg = RewriteH CoreProg
 type ReCore = RewriteH Core
 
 -- | Lookup the name in the context first, then, failing that, in GHC's global
@@ -668,11 +670,22 @@ tweakName = intercalate "_" . map dropModules . words
    dropModules (break (== '.') -> (_,'.':rest)) = dropModules rest
    dropModules s = s
 
-findDef :: Observing -> Label -> TransformM c a CoreExpr
-findDef brag lab = constT (defExpr <$> lookupDef lab)
-                     >>> (if brag then traceR ("memo hit on " ++ lab) else idR)
+-- | Save a definition for future use.
+saveDefT :: Observing -> Label -> CoreDef -> TransformM c a ()
+saveDefT brag lab def =
+  constT (saveDef lab def) >>>
+  (if brag then traceR ("memo save " ++ lab) else idR)
+
+findDefT :: Observing -> Label -> TransformM c a CoreExpr
+findDefT brag lab = constT (defExpr <$> lookupDef lab)
+                >>> (if brag then traceR ("memo hit on " ++ lab) else idR)
  where
    defExpr (Def _ expr) = expr
+
+saveDefNoFloat :: Observing -> String -> CoreExpr -> TransformM c a ()
+saveDefNoFloat brag lab e =
+  do v <- newIdT bogusDefName $* exprType e
+     saveDefT brag lab (Def v e)
 
 -- | unJust as transform. Fails on Nothing.
 -- Already in Kure?
@@ -810,10 +823,6 @@ bogusDefName = "$bogus-def-name$"
 
 dropBogus :: Unop (Map Id CoreExpr)
 dropBogus = Map.filterWithKey (\ v _ -> uqVarName v /= bogusDefName)
-
-saveDefNoFloat :: String -> CoreExpr -> TransformM c a ()
-saveDefNoFloat lab e = do v <- newIdT bogusDefName $* exprType e
-                          constT (saveDef lab (Def v e))
 
 -- | Dump the stash of definitions.
 dumpStashR :: RewriteH CoreProg
