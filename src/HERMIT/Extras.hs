@@ -1,6 +1,6 @@
 {-# LANGUAGE CPP, Rank2Types, ConstraintKinds, PatternGuards, ViewPatterns #-}
 {-# LANGUAGE FlexibleContexts, FlexibleInstances, MultiParamTypeClasses #-}
-{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE ScopedTypeVariables, TupleSections #-}
 {-# LANGUAGE DeriveDataTypeable, TypeFamilies #-}
 {-# LANGUAGE UndecidableInstances #-} -- see below
 -- {-# LANGUAGE BangPatterns #-}
@@ -29,7 +29,7 @@ module HERMIT.Extras
   , tcFind0, tcFind, tcFind2
   , tcApp0, tcApp1, tcApp2
   , isPairTC, isPairTy, isEitherTy, isUnitTy, isBoolTy
-  , unliftedType
+  , onAltRhs, unliftedType
   , apps, apps', apps1', callSplitT, callNameSplitT, unCall, unCall1
   , collectForalls, subst, isTyLam, setNominalRole_maybe
   , isVarT, isLitT
@@ -37,9 +37,10 @@ module HERMIT.Extras
     -- * HERMIT utilities
   , newIdT
   , liftedKind, unliftedKind
-  , ReType, ReExpr, ReProg, ReCore
+  , ReType, ReExpr, ReAlt, ReProg, ReCore
   , FilterH, FilterE, FilterTy, OkCM, TransformU
-  , findTyConT, isTypeE, isCastE, isDictE, tyConApp1T
+  , findTyConT, tyConApp1T
+  , isTypeE, isCastE, isDictE, isCoercionE
   , mkUnit, mkPair, mkLeft, mkRight, mkEither
   , InCoreTC
   , Observing, observeR', tries, triesL, labeled
@@ -60,7 +61,7 @@ module HERMIT.Extras
   , buildDictionaryT'
   , TransformM, RewriteM
   , repeatN
-  , saveDefNoFloat, dumpStashR, dropStashedLetR
+  , saveDefNoFloatT, dumpStashR, dropStashedLetR
   , progRhsAnyR
   , ($*), pairT, listT, unPairR
   , externC
@@ -130,6 +131,12 @@ type Binop a = a -> Unop a
 {--------------------------------------------------------------------
     Core utilities
 --------------------------------------------------------------------}
+
+-- | Rewrite a case alternative right-hand side.
+onAltRhs :: (Functor m, Monad m) =>
+            Rewrite c m CoreExpr -> Rewrite c m CoreAlt
+onAltRhs r = do (con,vs,rhs) <- id
+                (con,vs,) <$> r $* rhs
 
 -- Form an application to type and value arguments.
 apps :: Id -> [Type] -> [CoreExpr] -> CoreExpr
@@ -390,8 +397,9 @@ apps1' :: String -> [Type] -> CoreExpr -> TransformU CoreExpr
 apps1' s ts = apps' s ts . (:[])
 
 type ReType = RewriteH Type
-type ReExpr = RewriteH CoreExpr
 type ReProg = RewriteH CoreProg
+type ReExpr = RewriteH CoreExpr
+type ReAlt  = RewriteH CoreAlt
 type ReCore = RewriteH Core
 
 -- | Lookup the name in the context first, then, failing that, in GHC's global
@@ -671,10 +679,13 @@ tweakName = intercalate "_" . map dropModules . words
    dropModules s = s
 
 -- | Save a definition for future use.
-saveDefT :: Observing -> Label -> CoreDef -> TransformM c a ()
-saveDefT brag lab def =
-  constT (saveDef lab def) >>>
-  (if brag then traceR ("memo save " ++ lab) else idR)
+saveDefT :: Observing -> Label -> TransformM c CoreDef ()
+saveDefT brag lab =
+  do def <- id
+     constT (saveDef lab def) >>>
+       (if brag then traceR ("memo save " ++ lab) else idR)
+
+-- TODO: contextfreeT to get def
 
 findDefT :: Observing -> Label -> TransformM c a CoreExpr
 findDefT brag lab = constT (defExpr <$> lookupDef lab)
@@ -682,10 +693,11 @@ findDefT brag lab = constT (defExpr <$> lookupDef lab)
  where
    defExpr (Def _ expr) = expr
 
-saveDefNoFloat :: Observing -> String -> CoreExpr -> TransformM c a ()
-saveDefNoFloat brag lab e =
-  do v <- newIdT bogusDefName $* exprType e
-     saveDefT brag lab (Def v e)
+saveDefNoFloatT :: Observing -> String -> TransformM c CoreExpr ()
+saveDefNoFloatT brag lab =
+  do e <- id
+     v <- newIdT bogusDefName $* exprType e
+     saveDefT brag lab $* Def v e
 
 -- | unJust as transform. Fails on Nothing.
 -- Already in Kure?
@@ -795,6 +807,10 @@ isCastE = castT id id mempty
 -- | Is the expression a dictionary?
 isDictE :: FilterE
 isDictE = guardT . (isDictTy <$> exprTypeT)
+
+-- | Is the expression a coercion?
+isCoercionE :: FilterE
+isCoercionE = coercionT mempty
 
 -- | Like tyConAppT, but for single type argument.
 tyConApp1T :: (ExtendCrumb c, Monad m) =>
