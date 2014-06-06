@@ -678,22 +678,30 @@ tweakName = intercalate "_" . map dropModules . words
    dropModules (break (== '.') -> (_,'.':rest)) = dropModules rest
    dropModules s = s
 
+memoChat :: (ReadBindings c, ReadCrumb c, Injection a CoreTC) =>
+            Bool -> String -> Label -> RewriteM c a
+memoChat brag pre lab =
+  if brag then
+    observeR ("memo " ++ pre ++ ": " ++ lab)
+  else
+    id
+
 -- | Save a definition for future use.
-saveDefT :: Observing -> Label -> TransformM c CoreDef ()
+saveDefT :: (ReadBindings c, ReadCrumb c) =>
+            Observing -> Label -> TransformM c CoreDef ()
 saveDefT brag lab =
-  do def <- id
-     constT (saveDef lab def) >>>
-       (if brag then traceR ("memo save " ++ lab) else idR)
+  do def@(Def _ e) <- id
+     constT (saveDef lab def) >>> (memoChat brag "save" lab $* e >> return ())
 
--- TODO: contextfreeT to get def
-
-findDefT :: Observing -> Label -> TransformM c a CoreExpr
-findDefT brag lab = constT (defExpr <$> lookupDef lab)
-                >>> (if brag then traceR ("memo hit on " ++ lab) else idR)
+findDefT :: (ReadBindings c, ReadCrumb c) =>
+            Observing -> Label -> TransformM c a CoreExpr
+findDefT brag lab =
+  constT (defExpr <$> lookupDef lab) >>> memoChat brag "hit" lab
  where
    defExpr (Def _ expr) = expr
 
-saveDefNoFloatT :: Observing -> String -> TransformM c CoreExpr ()
+saveDefNoFloatT :: (ReadBindings c, ReadCrumb c) =>
+                   Observing -> String -> TransformM c CoreExpr ()
 saveDefNoFloatT brag lab =
   do e <- id
      v <- newIdT bogusDefName $* exprType e
