@@ -47,13 +47,13 @@ module HERMIT.Extras
   , lintExprR -- , lintExprDieR
   , lintingExprR
   , varLitE, uqVarName, fqVarName, typeEtaLong, simplifyE
-  , walkE , anytdE, anybuE, onetdE, onebuE
+  , walkE , alltdE, anytdE, anybuE, onetdE, onebuE
   , inAppTys, isAppTy, inlineWorkerR
   , letFloatToProg
   , concatProgs
   , rejectR , rejectTypeR
   , simplifyExprR, whenChangedR
-  , showPprT, stashLabel, saveDefT, findDefT
+  , showPprT, stashLabel, tweakLabel, saveDefT, findDefT
   , unJustT, tcViewT, unFunCo
   , lamFloatCastR, castFloatLamR, castCastR, unCastCastR, castFloatAppR', castFloatCaseR, caseFloatR'
   , caseWildR
@@ -586,7 +586,8 @@ simplifyE = extractR simplifyR
 walkE :: Unop ReCore -> Unop ReExpr
 walkE trav r = extractR (trav (promoteR r :: ReCore))
 
-anytdE, anybuE, onetdE, onebuE :: Unop ReExpr
+alltdE, anytdE, anybuE, onetdE, onebuE :: Unop ReExpr
+alltdE = walkE alltdR
 anytdE = walkE anytdR
 anybuE = walkE anybuR
 onetdE = walkE onetdR
@@ -669,10 +670,10 @@ showPprT = do a <- id
 -- | Make a stash label out of an outputtable
 stashLabel :: (Functor m, Monad m, HasDynFlags m, Outputable a) =>
               Transform c m a String
-stashLabel = tweakName <$> showPprT
+stashLabel = tweakLabel <$> showPprT
 
-tweakName :: Unop String
-tweakName = intercalate "_" . map dropModules . words
+tweakLabel :: Unop String
+tweakLabel = intercalate "_" . map dropModules . words
  where
    dropModules (c:rest) | not (isUpper c) = c : dropModules rest
    dropModules (break (== '.') -> (_,'.':rest)) = dropModules rest
