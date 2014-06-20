@@ -37,7 +37,7 @@ module HERMIT.Extras
     -- * HERMIT utilities
   , newIdT
   , liftedKind, unliftedKind
-  , ReType, ReExpr, ReAlt, ReProg, ReCore
+  , ReType, ReExpr, ReBind, ReAlt, ReProg, ReCore
   , FilterH, FilterE, FilterTy, OkCM, TransformU
   , findTyConT, tyConApp1T
   , isTypeE, isCastE, isDictE, isCoercionE
@@ -398,6 +398,7 @@ apps1' s ts = apps' s ts . (:[])
 
 type ReType = RewriteH Type
 type ReProg = RewriteH CoreProg
+type ReBind = RewriteH CoreBind
 type ReExpr = RewriteH CoreExpr
 type ReAlt  = RewriteH CoreAlt
 type ReCore = RewriteH Core
@@ -683,9 +684,12 @@ memoChat :: (ReadBindings c, ReadCrumb c, Injection a CoreTC) =>
             Bool -> String -> Label -> RewriteM c a
 memoChat brag pre lab =
   if brag then
-    observeR ("memo " ++ pre ++ ": " ++ lab)
+    chat ("memo " ++ pre ++ ": " ++ lab)
   else
     id
+ where
+   chat = traceR
+          -- observeR
 
 -- | Save a definition for future use.
 saveDefT :: (ReadBindings c, ReadCrumb c) =>
