@@ -66,6 +66,7 @@ module HERMIT.Extras
   , ($*), pairT, listT, unPairR
   , externC
   , normaliseTypeT, normalizeTypeT, optimizeCoercionR, optimizeCastR
+  , bindUnLetIntroR, letFloatCaseAltR
   ) where
 
 import Prelude hiding (id,(.))
@@ -96,7 +97,7 @@ import OptCoercion (optCoercion)
 
 -- import Language.KURE.Transform (apply)
 import HERMIT.Core
-  ( CoreProg(..),Crumb,bindsToProg,progToBinds
+  ( CoreProg(..),Crumb,bindsToProg,progToBinds,freeVarsExpr
   , exprSyntaxEq,CoreDef(..),defToIdExpr, coercionAlphaEq, coercionSyntaxEq )
 import HERMIT.Monad
   (HermitM,HasModGuts(..),HasHscEnv(..),newIdH,Label,saveDef,lookupDef,getStash)
@@ -977,3 +978,42 @@ optimizeCoercionR =
 -- | Optimize a cast.
 optimizeCastR :: ExtendCrumb c => RewriteM c CoreExpr
 optimizeCastR = castAllR id optimizeCoercionR
+
+bindUnLetIntroR :: ReBind
+bindUnLetIntroR =
+  do NonRec x (Let (NonRec y e) (Var ((== y) -> True))) <- id
+     return (NonRec x e)
+
+-- | Float a let out of a case alternative:
+-- 
+--   case foo of { ... ; p -> let x = u in v ; ... }  ==>
+--   let x = u in case foo of { ... ; p -> v ; ... }
+-- 
+-- where no variable in `p` occurs freely in `u`, and where `x` is not one of
+-- the variables in `p`.
+letFloatCaseAltR :: ReExpr
+letFloatCaseAltR =
+  do Case scrut w ty alts <- id
+     (b,alts') <- letFloatOneAltR alts
+     return $ Let b (Case scrut w ty alts')
+
+-- Perform the first safe let-floating out of a case alternative
+letFloatOneAltR :: [CoreAlt] -> TransformH x (CoreBind,[CoreAlt])
+letFloatOneAltR [] = fail "no alternatives safe to let-float"
+letFloatOneAltR (alt:rest) =
+  (do (bind,alt') <- letFloatAltR alt
+      return (bind,alt':rest))
+  <+
+  (second (alt :) <$> letFloatOneAltR rest)
+
+-- (p -> let bind in e) ==>  (bind, p -> e)
+letFloatAltR :: CoreAlt -> TransformH x (CoreBind,CoreAlt)
+letFloatAltR (con,vs,Let bind@(NonRec x a) body)
+  | isEmptyVarSet (vset `intersectVarSet` freeVarsExpr a)
+    && not (x `elemVarSet` vset)
+  = return (bind,(con,vs,body))
+ where
+   vset = mkVarSet vs
+letFloatAltR _ = fail "letFloatAltR: not applicable"
+
+-- TODO: consider variable occurrence conditions more carefully
