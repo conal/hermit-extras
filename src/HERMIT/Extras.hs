@@ -19,6 +19,8 @@
 -- Some definitions useful with HERMIT.
 ----------------------------------------------------------------------
 
+#define MyBuildDict
+
 -- #define WatchFailures
 
 module HERMIT.Extras
@@ -58,6 +60,9 @@ module HERMIT.Extras
   , lamFloatCastR, castFloatLamR, castCastR, unCastCastR, castFloatAppR', castFloatCaseR, caseFloatR'
   , caseWildR
   , bashExtendedWithE, bashUsingE, bashE
+#ifdef MyBuildDict
+  , buildDictionaryT
+#endif
   , buildDictionaryT'
   , TransformM, RewriteM
   , repeatN
@@ -100,7 +105,7 @@ import HERMIT.Core
   ( CoreProg(..),Crumb,bindsToProg,progToBinds,freeVarsExpr
   , exprSyntaxEq,CoreDef(..),defToIdExpr, coercionAlphaEq, coercionSyntaxEq )
 import HERMIT.Monad
-  (HermitM,HasModGuts(..),HasHscEnv(..),newIdH,Label,saveDef,lookupDef,getStash)
+  (HermitM,HasHscEnv(..),HasHermitMEnv,getModGuts,newIdH,Label,saveDef,lookupDef,getStash)
 import HERMIT.Context
   ( BoundVars(..),AddBindings(..),ReadBindings(..)
   , HasEmptyContext(..), HasCoreRules(..)
@@ -111,13 +116,22 @@ import HERMIT.Dictionary
   , observeR, bracketR, bashExtendedWithR, bashUsingR, bashR, wrongExprForm
   , castFloatAppR
   , caseFloatCastR, caseFloatCaseR, caseFloatAppR, caseFloatLetR
-  , unshadowR, lintExprT, buildDictionaryT, inScope, inlineR
+  , unshadowR, lintExprT, inScope, inlineR
+#ifndef MyBuildDict
+  , buildDictionaryT
+#endif
   , traceR
   )
 -- import HERMIT.Dictionary (traceR)
 import HERMIT.GHC hiding (FastString(..),(<>))
 import HERMIT.Kure hiding (apply)
 import HERMIT.External (External,Extern(..),external,ExternalName)
+
+#ifdef MyBuildDict
+import Data.Char (isSpace)
+import HERMIT.Monad (liftCoreM)
+#endif
+
 
 {--------------------------------------------------------------------
     Misc
@@ -381,8 +395,8 @@ newIdT nm = do ty <- id
 --   , BoundVars c, HasModGuts m )
 
 type OkCM c m = 
-  ( BoundVars c, Functor m, HasDynFlags m, HasModGuts m, HasHscEnv m
-  , MonadCatch m, MonadIO m, MonadThings m )
+  ( BoundVars c, HasDynFlags m, HasHscEnv m, HasHermitMEnv m
+  , Functor m, MonadCatch m, MonadIO m, MonadThings m )
 
 type TransformU b = forall c m a. OkCM c m => Transform c m a b
 
@@ -841,7 +855,23 @@ buildDictionaryT' :: TransformH Type CoreExpr
 buildDictionaryT' = setFailMsg "Couldn't build dictionary" $
                     tryR bashE . lintExprR . buildDictionaryT
 
--- TODO: Can I eliminate the CustomC requirement in debugR?
+#ifdef MyBuildDict
+-- Tweak of HERMIT's version.
+-- Checks for empty bindings (`null bnds`):
+
+buildDictionaryT :: Transform c HermitM Type CoreExpr
+buildDictionaryT = contextfreeT $ \ ty -> do
+    dflags <- getDynFlags
+    binder <- newIdH ("$d" ++ filter (not . isSpace) (showPpr dflags ty)) ty
+    guts <- getModGuts
+    (i,bnds) <- liftCoreM $ buildDictionary guts binder
+    if null bnds then
+      fail "couldn't build dictionary"
+     else
+       return $ case bnds of
+                  [NonRec v e] | i == v -> e -- the common case that we would have gotten a single non-recursive let
+                  _ -> mkCoreLets bnds (varToCoreExpr i)
+#endif
 
 -- | Repeat a rewriter exactly @n@ times.
 repeatN :: Monad m => Int -> Unop (Rewrite c m a)
@@ -952,7 +982,7 @@ externC name rew help =
 
 -- Adapted from Andrew Farmer's code
 -- | Alias for 'normalizeTypeT'.
-normaliseTypeT :: (MonadIO m, HasModGuts m, HasHscEnv m) =>
+normaliseTypeT :: (MonadIO m, HasHscEnv m, HasHermitMEnv m) =>
                   Role -> Transform c m Type (Coercion, Type)
 normaliseTypeT r = do
   envs <- constT $ do
@@ -965,7 +995,7 @@ normaliseTypeT r = do
 
 -- | Normalize a type, giving coercion and result type.
 -- Fails if already normalized (rather than returning 'ReflCo').
-normalizeTypeT :: (MonadIO m, HasModGuts m, HasHscEnv m) =>
+normalizeTypeT :: (MonadIO m, HasHscEnv m, HasHermitMEnv m) =>
                   Role -> Transform c m Type (Coercion, Type)
 normalizeTypeT = normaliseTypeT
 
