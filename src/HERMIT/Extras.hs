@@ -19,7 +19,7 @@
 -- Some definitions useful with HERMIT.
 ----------------------------------------------------------------------
 
-#define MyBuildDict
+-- #define MyBuildDict
 
 -- #define WatchFailures
 
@@ -455,8 +455,10 @@ callSplitT = do (f,args) <- callT
                 let (tyArgs,valArgs) = splitTysVals args
                 return (f,tyArgs,valArgs)
 
-callNameSplitT :: MonadCatch m => String
-               -> Transform c m CoreExpr (CoreExpr, [Type], [Expr CoreBndr])
+callNameSplitT ::
+  ( MonadCatch m, MonadIO m, MonadThings m, HasHscEnv m, HasHermitMEnv m
+  , BoundVars c ) =>
+  String -> Transform c m CoreExpr (CoreExpr, [Type], [Expr CoreBndr])
 callNameSplitT name = do (f,args) <- callNameT name
                          let (tyArgs,valArgs) = splitTysVals args
                          return (f,tyArgs,valArgs)
@@ -464,8 +466,9 @@ callNameSplitT name = do (f,args) <- callNameT name
 -- TODO: refactor with something like HERMIT's callPredT
 
 -- | Uncall a named function
-unCall :: MonadCatch m =>
-          String -> Transform c m CoreExpr [CoreExpr]
+unCall ::  ( MonadCatch m, MonadIO m, MonadThings m, HasHscEnv m, HasHermitMEnv m
+           , BoundVars c ) =>
+           String -> Transform c m CoreExpr [CoreExpr]
 unCall f = do (_f,_tys,args) <- callNameSplitT f
               return args
 
@@ -558,7 +561,9 @@ lintingExprR msg rr =
      res <- attemptM (return e' >>> lintExprT)
      either (\ lintMsg -> return e >>>
                           bracketR msg rr' >>>
-                          error lintMsg)
+                          error lintMsg
+                          -- traceR lintMsg
+            )
             (const (return e'))
             res
  where
@@ -853,7 +858,7 @@ tyConApp1T ra rb h =
 
 buildDictionaryT' :: TransformH Type CoreExpr
 buildDictionaryT' = setFailMsg "Couldn't build dictionary" $
-                    tryR bashE . lintExprR . buildDictionaryT
+                    tryR bashE {- . lintExprR -} . buildDictionaryT
 
 #ifdef MyBuildDict
 -- Tweak of HERMIT's version.
@@ -970,7 +975,8 @@ listT rs =
      guardMsg (length rs == length es) "listT: length mismatch"
      sequence (zipWith ($*) rs es)
 
-unPairR :: (Functor m, MonadCatch m) =>
+unPairR :: ( Functor m, MonadCatch m, MonadThings m, MonadIO m
+           , HasHermitMEnv m, HasHscEnv m, BoundVars c ) =>
            Transform c m CoreExpr (CoreExpr,CoreExpr)
 unPairR = do [_,_,a,b] <- snd <$> callNameT "GHC.Tuple.(,)"
              return (a,b)
