@@ -1009,6 +1009,7 @@ optimizeCoercionR =
 optimizeCastR :: ExtendCrumb c => RewriteM c CoreExpr
 optimizeCastR = castAllR id optimizeCoercionR
 
+-- | x = (let y = e in y)  ==>  x = e
 bindUnLetIntroR :: ReBind
 bindUnLetIntroR =
   do NonRec x (Let (NonRec y e) (Var ((== y) -> True))) <- id
