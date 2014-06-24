@@ -19,8 +19,6 @@
 -- Some definitions useful with HERMIT.
 ----------------------------------------------------------------------
 
--- #define MyBuildDict
-
 -- #define WatchFailures
 
 module HERMIT.Extras
@@ -60,9 +58,6 @@ module HERMIT.Extras
   , lamFloatCastR, castFloatLamR, castCastR, unCastCastR, castFloatAppR', castFloatCaseR, caseFloatR'
   , caseWildR
   , bashExtendedWithE, bashUsingE, bashE
-#ifdef MyBuildDict
-  , buildDictionaryT
-#endif
   , buildDictionaryT'
   , TransformM, RewriteM
   , repeatN
@@ -72,6 +67,7 @@ module HERMIT.Extras
   , externC
   , normaliseTypeT, normalizeTypeT, optimizeCoercionR, optimizeCastR
   , bindUnLetIntroR, letFloatCaseAltR
+  , pruneAltsExpr
   ) where
 
 import Prelude hiding (id,(.))
@@ -81,7 +77,9 @@ import Control.Category (Category(..),(>>>))
 import Data.Functor ((<$>),(<$))
 import Data.Foldable (foldMap)
 import Control.Applicative (Applicative(..),liftA2,(<|>))
+import Control.Monad ((<=<))
 import Control.Arrow (Arrow(..))
+import Data.Maybe (catMaybes,fromMaybe)
 import Data.List (intercalate,isPrefixOf)
 import Text.Printf (printf)
 import Data.Typeable (Typeable)
@@ -99,6 +97,7 @@ import SimplCore (simplifyExpr)
 import FamInstEnv (normaliseType)
 import qualified Coercion
 import OptCoercion (optCoercion)
+import Type (substTy)
 
 -- import Language.KURE.Transform (apply)
 import HERMIT.Core
@@ -116,22 +115,13 @@ import HERMIT.Dictionary
   , observeR, bracketR, bashExtendedWithR, bashUsingR, bashR, wrongExprForm
   , castFloatAppR
   , caseFloatCastR, caseFloatCaseR, caseFloatAppR, caseFloatLetR
-  , unshadowR, lintExprT, inScope, inlineR
-#ifndef MyBuildDict
-  , buildDictionaryT
-#endif
+  , unshadowR, lintExprT, inScope, inlineR, buildDictionaryT
   , traceR
   )
 -- import HERMIT.Dictionary (traceR)
-import HERMIT.GHC hiding (FastString(..),(<>))
+import HERMIT.GHC hiding (FastString(..),(<>),substTy)
 import HERMIT.Kure hiding (apply)
 import HERMIT.External (External,Extern(..),external,ExternalName)
-
-#ifdef MyBuildDict
-import Data.Char (isSpace)
-import HERMIT.Monad (liftCoreM)
-#endif
-
 
 {--------------------------------------------------------------------
     Misc
@@ -860,24 +850,6 @@ buildDictionaryT' :: TransformH Type CoreExpr
 buildDictionaryT' = setFailMsg "Couldn't build dictionary" $
                     tryR bashE {- . lintExprR -} . buildDictionaryT
 
-#ifdef MyBuildDict
--- Tweak of HERMIT's version.
--- Checks for empty bindings (`null bnds`):
-
-buildDictionaryT :: Transform c HermitM Type CoreExpr
-buildDictionaryT = contextfreeT $ \ ty -> do
-    dflags <- getDynFlags
-    binder <- newIdH ("$d" ++ filter (not . isSpace) (showPpr dflags ty)) ty
-    guts <- getModGuts
-    (i,bnds) <- liftCoreM $ buildDictionary guts binder
-    if null bnds then
-      fail "couldn't build dictionary"
-     else
-       return $ case bnds of
-                  [NonRec v e] | i == v -> e -- the common case that we would have gotten a single non-recursive let
-                  _ -> mkCoreLets bnds (varToCoreExpr i)
-#endif
-
 -- | Repeat a rewriter exactly @n@ times.
 repeatN :: Monad m => Int -> Unop (Rewrite c m a)
 repeatN n = serialise . replicate n
@@ -1054,3 +1026,63 @@ letFloatAltR (con,vs,Let bind@(NonRec x a) body)
 letFloatAltR _ = fail "letFloatAltR: not applicable"
 
 -- TODO: consider variable occurrence conditions more carefully
+
+{--------------------------------------------------------------------
+    Case alternative pruning
+--------------------------------------------------------------------}
+
+pruneAltsExpr :: CoreExpr -> PruneEnv -> CoreExpr
+pruneAltsExpr e@(Var _)      = pure e
+pruneAltsExpr e@(Lit _)      = pure e
+pruneAltsExpr (App u v)      = liftA2 App (pruneAltsExpr u) (pruneAltsExpr v)
+pruneAltsExpr (Lam x e)      = Lam x <$> (pruneAltsExpr e . pruneBound x)
+pruneAltsExpr (Let b e)      = liftA2 Let (pruneAltsBind b) (pruneAltsExpr e)
+pruneAltsExpr (Case e w ty alts) =
+  Case <$> (pruneAltsExpr e)
+       <*> pure w
+       <*> pure ty
+       <*> (catMaybes <$> mapM pruneAltsAlt alts)
+pruneAltsExpr (Cast e co)    = Cast <$> pruneAltsExpr e <*> pure co
+pruneAltsExpr (Tick t e)     = Tick t <$> pruneAltsExpr e
+pruneAltsExpr e@(Type _)     = pure e
+pruneAltsExpr e@(Coercion _) = pure e
+
+pruneAltsBind :: CoreBind -> PruneEnv -> CoreBind
+pruneAltsBind (NonRec x e) = NonRec x <$> (pruneAltsExpr e . pruneBound x)
+pruneAltsBind (Rec _)      = error "pruneAltsBind: Rec not yet handled"
+
+pruneAltsAlt :: CoreAlt -> PruneEnv -> Maybe CoreAlt
+pruneAltsAlt (con,vs0,e) =
+--   \ env -> case prune vs0 env of
+--              Nothing -> Nothing
+--              Just env' -> Just (con,vs0,pruneAltsExpr e env')
+  (fmap.fmap) ((con,vs0,) . pruneAltsExpr e) (prune vs0)
+ where
+   prune :: [Id] -> PruneEnv -> Maybe PruneEnv
+   prune = foldr (\ v q -> q <=< extendPruneEnvVar v) pure
+
+-- I think I'll want to combine pruneBound and consistentVar, yielding a Maybe
+-- PruneEnv. What do I do for pruneAltsExpr etc if a lambda binding proves
+-- impossible? What about a let binding?
+
+extendPruneEnvVar :: Var -> PruneEnv -> Maybe PruneEnv
+extendPruneEnvVar v | isCoVar v && coVarRole v == Nominal =
+                      extendPruneEnvTys (coVarKind v)
+                    | otherwise = pure
+
+pruneBound :: Var -> Unop PruneEnv
+pruneBound v =
+  fromMaybe (error "pruneBound: contradiction") . extendPruneEnvVar v
+
+type PruneEnv = TvSubst  -- for now
+
+extendPruneEnvTys :: (Type,Type) -> PruneEnv -> Maybe PruneEnv
+extendPruneEnvTys (a,b) sub =
+  unionTvSubst sub <$> tcUnifyTy (substTy sub a) (substTy sub b)
+
+-- TODO: Can I really use unionTvSubst here?
+-- Note comment "Works when the ranges are disjoint"
+
+-- TODO: Maybe use normaliseType and check that the resulting coercion is nominal
+-- TODO: Handle Representational coercions?
+
