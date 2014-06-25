@@ -67,7 +67,8 @@ module HERMIT.Extras
   , externC
   , normaliseTypeT, normalizeTypeT, optimizeCoercionR, optimizeCastR
   , bindUnLetIntroR, letFloatCaseAltR
-  , pruneAltsExpr
+  , letElimTrivialR, betaReduceTrivialR
+  , pruneAltsExpr, pruneAltsR
   ) where
 
 import Prelude hiding (id,(.))
@@ -111,7 +112,7 @@ import HERMIT.Context
   , HermitC )
 -- Note that HERMIT.Dictionary re-exports HERMIT.Dictionary.*
 import HERMIT.Dictionary
-  ( findIdT, callT, callNameT, simplifyR, letFloatTopR
+  ( findIdT, callT, callNameT, simplifyR, letFloatTopR, letSubstR, betaReduceR
   , observeR, bracketR, bashExtendedWithR, bashUsingR, bashR, wrongExprForm
   , castFloatAppR
   , caseFloatCastR, caseFloatCaseR, caseFloatAppR, caseFloatLetR
@@ -1028,8 +1029,48 @@ letFloatAltR _ = fail "letFloatAltR: not applicable"
 -- TODO: consider variable occurrence conditions more carefully
 
 {--------------------------------------------------------------------
+    Triviality
+--------------------------------------------------------------------}
+
+-- | Trivial expression: for now, literals, variables, casts of trivial.
+trivialExpr :: FilterE
+trivialExpr = setFailMsg "Non-trivial" $
+              isTypeE <+ isVarT <+ isCoercionE <+ isDictE <+ isLitT
+           <+ trivialLam
+           <+ castT trivialExpr id mempty
+
+trivialBind :: FilterH CoreBind
+trivialBind = nonRecT successT trivialExpr mempty
+
+trivialLet :: FilterE
+trivialLet = letT trivialBind successT mempty
+
+trivialLam :: FilterE
+trivialLam = lamT id trivialExpr mempty
+
+trivialBetaRedex :: FilterE
+trivialBetaRedex = appT trivialLam successT mempty
+
+-- These filters could instead be predicates. Then use acceptR.
+
+letElimTrivialR :: ReExpr
+letElimTrivialR = -- watchR "trivialLet" $
+                  trivialLet >> letSubstR
+
+betaReduceTrivialR :: ReExpr
+betaReduceTrivialR = -- watchR "betaReduceTrivialR" $
+                     trivialBetaRedex >> betaReduceR
+
+{--------------------------------------------------------------------
     Case alternative pruning
 --------------------------------------------------------------------}
+
+pruneAltsR :: ReExpr
+pruneAltsR = whenChangedR "pruneAltsR" exprSyntaxEq $
+               arr (flip pruneAltsExpr emptyTvSubst)
+
+-- TODO: generalize this pattern with whenChangedR and arr.
+-- Maybe have a type class for syntactic equality.
 
 pruneAltsExpr :: CoreExpr -> PruneEnv -> CoreExpr
 pruneAltsExpr e@(Var _)      = pure e
