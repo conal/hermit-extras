@@ -33,7 +33,7 @@ module HERMIT.Extras
   , apps, apps', apps1', callSplitT, callNameSplitT, unCall, unCall1
   , collectForalls, subst, isTyLam, setNominalRole_maybe
   , isVarT, isLitT
-  , repr, varOccCount, castOccsSame
+  , repr, varOccCount, oneOccT, castOccsSame
     -- * HERMIT utilities
   , newIdT
   , liftedKind, unliftedKind
@@ -67,7 +67,7 @@ module HERMIT.Extras
   , externC
   , normaliseTypeT, normalizeTypeT, optimizeCoercionR, optimizeCastR
   , bindUnLetIntroR, letFloatCaseAltR
-  , letElimTrivialR, betaReduceTrivialR
+  , trivialExpr, letElimTrivialR, betaReduceTrivialR
   , pruneAltsExpr, pruneAltsR
   ) where
 
@@ -299,6 +299,12 @@ varOccCount v = occs 0
    occs !n (Tick _ e)       = occs n e
    occs !n _                = n
 #endif
+
+-- | Matches a let binding with exactly one occurrence of the variable.
+oneOccT :: FilterE
+oneOccT =
+  do Let (NonRec v _) body <- id
+     guardMsg (varOccCount v body <= 1) "oneOccT: multiple occurrences"
 
 data VarCasts = NoCast | Casts Coercion | FailCast
 
@@ -1032,12 +1038,27 @@ letFloatAltR _ = fail "letFloatAltR: not applicable"
     Triviality
 --------------------------------------------------------------------}
 
+-- exprIsTrivial :: CoreExpr -> Bool
+-- exprIsTrivial (Var {})     = True
+-- exprIsTrivial (Lit {})     = True
+-- exprIsTrivial (App {})     = False
+-- exprIsTrivial (Lam _ e)    = exprIsTrivial e
+-- exprIsTrivial (Case {})    = False
+-- exprIsTrivial (Cast e _)   = exprIsTrivial e
+-- exprIsTrivial (Tick _ e)   = exprIsTrivial e
+-- exprIsTrivial (Type {})    = True
+-- exprIsTrivial (Coercion _) = True
+
+-- Instead use exprIsTrivial from GHC's CoreUtils
+
 -- | Trivial expression: for now, literals, variables, casts of trivial.
 trivialExpr :: FilterE
 trivialExpr = setFailMsg "Non-trivial" $
               isTypeE <+ isVarT <+ isCoercionE <+ isDictE <+ isLitT
            <+ trivialLam
            <+ castT trivialExpr id mempty
+
+-- TODO: Maybe use a guardM variant and GHC's exprIsTrivial
 
 trivialBind :: FilterH CoreBind
 trivialBind = nonRecT successT trivialExpr mempty
@@ -1090,7 +1111,12 @@ pruneAltsExpr e@(Coercion _) = pure e
 
 pruneAltsBind :: CoreBind -> PruneEnv -> CoreBind
 pruneAltsBind (NonRec x e) = NonRec x <$> (pruneAltsExpr e . pruneBound x)
-pruneAltsBind (Rec _)      = error "pruneAltsBind: Rec not yet handled"
+pruneAltsBind (Rec ves)    =
+  \ env -> Rec ((fmap.second) (flip pruneAltsExpr env) ves)
+
+-- For Rec, I'm not gathering any info about the variables, so some pruning may
+-- be missed. TODO: Reconsider.
+-- TODO: Use an applicative or monadic style for Rec.
 
 pruneAltsAlt :: CoreAlt -> PruneEnv -> Maybe CoreAlt
 pruneAltsAlt (con,vs0,e) =
