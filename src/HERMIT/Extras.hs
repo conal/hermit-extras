@@ -7,7 +7,7 @@
 {-# OPTIONS_GHC -Wall #-}
 
 {-# OPTIONS_GHC -fno-warn-unused-imports #-} -- TEMP
--- {-# OPTIONS_GHC -fno-warn-unused-binds   #-} -- TEMP
+{-# OPTIONS_GHC -fno-warn-unused-binds   #-} -- TEMP
 
 ----------------------------------------------------------------------
 -- |
@@ -67,8 +67,9 @@ module HERMIT.Extras
   , externC
   , normaliseTypeT, normalizeTypeT, optimizeCoercionR, optimizeCastR
   , bindUnLetIntroR, letFloatCaseAltR
-  , trivialExpr, letElimTrivialR, betaReduceTrivialR
-  , pruneAltsExpr, pruneAltsR
+  , trivialExpr, letSubstTrivialR, betaReduceTrivialR
+  , pruneAltsExpr, pruneAltsR -- might remove
+  , retypeExprR
   ) where
 
 import Prelude hiding (id,(.))
@@ -960,10 +961,10 @@ unPairR :: ( Functor m, MonadCatch m, MonadThings m, MonadIO m
 unPairR = do [_,_,a,b] <- snd <$> callNameT "GHC.Tuple.(,)"
              return (a,b)
 
-externC :: (Injection a Core) =>
+externC :: Injection a Core =>
            ExternalName -> RewriteH a -> String -> External
 externC name rew help =
-  external name (promoteR rew :: RewriteH Core) [help]
+  external name (promoteR rew :: ReCore) [help]
 
 -- Adapted from Andrew Farmer's code
 -- | Alias for 'normalizeTypeT'.
@@ -1074,9 +1075,9 @@ trivialBetaRedex = appT trivialLam successT mempty
 
 -- These filters could instead be predicates. Then use acceptR.
 
-letElimTrivialR :: ReExpr
-letElimTrivialR = -- watchR "trivialLet" $
-                  trivialLet >> letSubstR
+letSubstTrivialR :: ReExpr
+letSubstTrivialR = -- watchR "trivialLet" $
+                   trivialLet >> letSubstR
 
 betaReduceTrivialR :: ReExpr
 betaReduceTrivialR = -- watchR "betaReduceTrivialR" $
@@ -1093,7 +1094,11 @@ pruneAltsR = whenChangedR "pruneAltsR" exprSyntaxEq $
 -- TODO: generalize this pattern with whenChangedR and arr.
 -- Maybe have a type class for syntactic equality.
 
-pruneAltsExpr :: CoreExpr -> PruneEnv -> CoreExpr
+type InTvM a = TvSubst -> a
+
+type ReTv a = a -> InTvM a
+
+pruneAltsExpr :: ReTv CoreExpr
 pruneAltsExpr e@(Var _)      = pure e
 pruneAltsExpr e@(Lit _)      = pure e
 pruneAltsExpr (App u v)      = liftA2 App (pruneAltsExpr u) (pruneAltsExpr v)
@@ -1109,7 +1114,7 @@ pruneAltsExpr (Tick t e)     = Tick t <$> pruneAltsExpr e
 pruneAltsExpr e@(Type _)     = pure e
 pruneAltsExpr e@(Coercion _) = pure e
 
-pruneAltsBind :: CoreBind -> PruneEnv -> CoreBind
+pruneAltsBind :: ReTv CoreBind
 pruneAltsBind (NonRec x e) = NonRec x <$> (pruneAltsExpr e . pruneBound x)
 pruneAltsBind (Rec ves)    =
   \ env -> Rec ((fmap.second) (flip pruneAltsExpr env) ves)
@@ -1118,38 +1123,99 @@ pruneAltsBind (Rec ves)    =
 -- be missed. TODO: Reconsider.
 -- TODO: Use an applicative or monadic style for Rec.
 
-pruneAltsAlt :: CoreAlt -> PruneEnv -> Maybe CoreAlt
+pruneAltsAlt :: CoreAlt -> InTvM (Maybe CoreAlt)
 pruneAltsAlt (con,vs0,e) =
 --   \ env -> case prune vs0 env of
 --              Nothing -> Nothing
 --              Just env' -> Just (con,vs0,pruneAltsExpr e env')
   (fmap.fmap) ((con,vs0,) . pruneAltsExpr e) (prune vs0)
  where
-   prune :: [Id] -> PruneEnv -> Maybe PruneEnv
-   prune = foldr (\ v q -> q <=< extendPruneEnvVar v) pure
+   prune :: [Id] -> TvSubst -> Maybe TvSubst
+   prune = foldr (\ v q -> q <=< extendTvSubstVar v) pure
 
 -- I think I'll want to combine pruneBound and consistentVar, yielding a Maybe
--- PruneEnv. What do I do for pruneAltsExpr etc if a lambda binding proves
+-- TvSubst. What do I do for pruneAltsExpr etc if a lambda binding proves
 -- impossible? What about a let binding?
 
-extendPruneEnvVar :: Var -> PruneEnv -> Maybe PruneEnv
-extendPruneEnvVar v | isCoVar v && coVarRole v == Nominal =
-                      extendPruneEnvTys (coVarKind v)
-                    | otherwise = pure
+extendTvSubstVar :: Var -> InTvM (Maybe TvSubst)
+extendTvSubstVar v | isCoVar v && coVarRole v == Nominal =
+                      extendTvSubstTys (coVarKind v)
+                   | otherwise = pure
 
-pruneBound :: Var -> Unop PruneEnv
+pruneBound :: Var -> Unop TvSubst
 pruneBound v =
-  fromMaybe (error "pruneBound: contradiction") . extendPruneEnvVar v
+  fromMaybe (error "pruneBound: contradiction") . extendTvSubstVar v
 
-type PruneEnv = TvSubst  -- for now
-
-extendPruneEnvTys :: (Type,Type) -> PruneEnv -> Maybe PruneEnv
-extendPruneEnvTys (a,b) sub =
+extendTvSubstTys :: (Type,Type) -> TvSubst -> Maybe TvSubst
+extendTvSubstTys (a,b) sub =
   unionTvSubst sub <$> tcUnifyTy (substTy sub a) (substTy sub b)
 
--- TODO: Can I really use unionTvSubst here?
--- Note comment "Works when the ranges are disjoint"
+-- TODO: Can I really use unionTvSubst here? Note comment "Works when the ranges
+-- are disjoint"
 
--- TODO: Maybe use normaliseType and check that the resulting coercion is nominal
--- TODO: Handle Representational coercions?
+-- TODO: Maybe use normaliseType and check that the resulting coercion is
+-- nominal TODO: Handle Representational coercions?
 
+#if 1
+
+{--------------------------------------------------------------------
+    Type localization
+--------------------------------------------------------------------}
+
+-- Eliminate type variables determined by coercions, so that other
+-- transformations can use local information.
+-- Subsumes pruneAlt*
+
+-- TODO: Make retypeFoo into a class
+
+retypeExprR :: ReExpr
+retypeExprR = whenChangedR "retypeExprR" exprSyntaxEq $
+              arr (flip retypeExpr emptyTvSubst)
+
+retypeType :: ReTv Type
+retypeType = flip substTy
+
+retypeVar :: ReTv Var
+retypeVar x = \ sub -> setVarType x (substTy sub (varType x))
+
+retypeExpr :: ReTv CoreExpr
+retypeExpr (Var x)        = Var . retypeVar x
+retypeExpr e@(Lit _)      = pure e
+retypeExpr (App u v)      = liftA2 App (retypeExpr u) (retypeExpr v)
+retypeExpr (Lam x e)      = Lam <$> retypeVar x <*> (retypeExpr e . pruneBound x)
+retypeExpr (Let b e)      = liftA2 Let (retypeBind b) (retypeExpr e)
+retypeExpr (Case e w ty alts) =
+  Case <$> (retypeExpr e)
+       <*> retypeVar w
+       <*> retypeType ty
+       <*> (catMaybes <$> mapM retypeAlt alts)
+retypeExpr (Cast e co)    = mkCast <$> retypeExpr e <*> retypeCoercion co
+retypeExpr (Tick t e)     = Tick t <$> retypeExpr e
+retypeExpr (Type t)       = Type <$> retypeType t
+retypeExpr (Coercion co)  = Coercion <$> retypeCoercion co
+
+retypeBind :: ReTv CoreBind
+retypeBind (NonRec x e) = NonRec <$> retypeVar x <*> (retypeExpr e . pruneBound x)
+retypeBind (Rec ves)    =
+  Rec <$> mapM (\ (x,e) -> (,) <$> retypeVar x <*> retypeExpr e) ves
+
+retypeAlt :: CoreAlt -> InTvM (Maybe CoreAlt)
+retypeAlt (con,vs0,e) = go vs0 []
+ where
+   go :: [Var] -> [Var] -> TvSubst -> Maybe (CoreAlt)
+   go []     acc sub = return (con, reverse acc, retypeExpr e sub)
+   go (v:vs) acc sub | isCoVar v && coVarRole v == Nominal
+                       = extendTvSubstTys (coVarKind v) sub >>= go vs (v:acc)
+                     | otherwise
+                       = go vs (retypeVar v sub : acc) sub
+
+-- TODO: Consider coercions in let and lambda.
+
+-- For now, convert coercions to universal.
+retypeCoercion :: ReTv Coercion
+retypeCoercion (coercionKind -> Pair ty ty') =
+    -- optCoercion emptyCvSubst <$>
+    (mkUnivCo Nominal <$> retypeType ty <*> retypeType ty')
+
+
+#endif
