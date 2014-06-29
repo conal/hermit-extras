@@ -1,7 +1,7 @@
 {-# LANGUAGE CPP, Rank2Types, ConstraintKinds, PatternGuards, ViewPatterns #-}
 {-# LANGUAGE FlexibleContexts, FlexibleInstances, MultiParamTypeClasses #-}
 {-# LANGUAGE ScopedTypeVariables, TupleSections #-}
-{-# LANGUAGE DeriveDataTypeable, TypeFamilies #-}
+{-# LANGUAGE DeriveDataTypeable, DeriveFunctor, DeriveFoldable, TypeFamilies #-}
 {-# LANGUAGE UndecidableInstances #-} -- see below
 -- {-# LANGUAGE BangPatterns #-}
 {-# OPTIONS_GHC -Wall #-}
@@ -70,14 +70,15 @@ module HERMIT.Extras
   , trivialExpr, letSubstTrivialR, betaReduceTrivialR
   , pruneAltsExpr, pruneAltsR -- might remove
   , retypeExprR
+  , Tree(..), toTree, foldMapT, foldT
   ) where
 
-import Prelude hiding (id,(.))
+import Prelude hiding (id,(.),foldr)
 
 import Data.Monoid (Monoid(..),(<>))
 import Control.Category (Category(..),(>>>))
 import Data.Functor ((<$>),(<$))
-import Data.Foldable (foldMap)
+import Data.Foldable (Foldable(..))
 import Control.Applicative (Applicative(..),liftA2,(<|>))
 import Control.Monad ((<=<))
 import Control.Arrow (Arrow(..))
@@ -104,7 +105,7 @@ import Type (substTy)
 -- import Language.KURE.Transform (apply)
 import HERMIT.Core
   ( CoreProg(..),Crumb,bindsToProg,progToBinds,freeVarsExpr
-  , exprSyntaxEq,CoreDef(..),defToIdExpr, coercionAlphaEq, coercionSyntaxEq )
+  , exprSyntaxEq, typeSyntaxEq,CoreDef(..),defToIdExpr, coercionAlphaEq, coercionSyntaxEq )
 import HERMIT.Monad
   (HermitM,HasHscEnv(..),HasHermitMEnv,getModGuts,newIdH,Label,saveDef,lookupDef,getStash)
 import HERMIT.Context
@@ -784,7 +785,21 @@ unCastCastR = do e `Cast` (co1 `TransCo` co2) <- idR
 castFloatAppR' :: (MonadCatch m, ExtendCrumb c) =>
                   Rewrite c m CoreExpr
 castFloatAppR' = castFloatAppR <+
+                 -- castFloatAppUnivR <+
                  (appAllR unCastCastR id >>> castFloatAppR')
+
+-- Like castFloatApp but handles *all* coercions, and makes universal coercions.
+castFloatAppUnivR :: Monad m => Rewrite c m CoreExpr
+castFloatAppUnivR =
+  do App (Cast fun co) arg <- id
+     let Pair ty ty' = coercionKind co
+         role = coercionRole co
+     Just (a ,b ) <- return $ splitFunTy_maybe ty
+     Just (a',b') <- return $ splitFunTy_maybe ty'
+     guardMsg (a `typeSyntaxEq` a') "castFloatAppUnivR: cast changes domain types"
+     return $
+       mkCast (App fun (mkCast arg (mkUnivCo role a' a)))
+              (mkUnivCo role b b')
 
 -- | case e of p -> (rhs `cast` co)  ==> (case e of p -> rhs) `cast` co
 -- Inverse to 'caseFloatCastR', so don't use both rules!
@@ -1128,10 +1143,7 @@ pruneAltsAlt (con,vs0,e) =
 --   \ env -> case prune vs0 env of
 --              Nothing -> Nothing
 --              Just env' -> Just (con,vs0,pruneAltsExpr e env')
-  (fmap.fmap) ((con,vs0,) . pruneAltsExpr e) (prune vs0)
- where
-   prune :: [Id] -> TvSubst -> Maybe TvSubst
-   prune = foldr (\ v q -> q <=< extendTvSubstVar v) pure
+  (fmap.fmap) ((con,vs0,) . pruneAltsExpr e) (extendTvSubstVars vs0)
 
 -- I think I'll want to combine pruneBound and consistentVar, yielding a Maybe
 -- TvSubst. What do I do for pruneAltsExpr etc if a lambda binding proves
@@ -1141,6 +1153,10 @@ extendTvSubstVar :: Var -> InTvM (Maybe TvSubst)
 extendTvSubstVar v | isCoVar v && coVarRole v == Nominal =
                       extendTvSubstTys (coVarKind v)
                    | otherwise = pure
+
+extendTvSubstVars :: [Id] -> TvSubst -> Maybe TvSubst
+extendTvSubstVars = foldr (\ v q -> q <=< extendTvSubstVar v) pure
+
 
 pruneBound :: Var -> Unop TvSubst
 pruneBound v =
@@ -1179,10 +1195,15 @@ retypeVar :: ReTv Var
 retypeVar x = \ sub -> setVarType x (substTy sub (varType x))
 
 retypeExpr :: ReTv CoreExpr
-retypeExpr (Var x)        = Var . retypeVar x
+-- retypeExpr (Var x)        = Var . retypeVar x
+retypeExpr (Var x)        = \ sub -> let ty  = varType x
+                                         ty' = substTy sub ty
+                                     in
+                                       mkCast (Var x) (mkUnivCo Representational ty ty')
 retypeExpr e@(Lit _)      = pure e
 retypeExpr (App u v)      = liftA2 App (retypeExpr u) (retypeExpr v)
-retypeExpr (Lam x e)      = Lam <$> retypeVar x <*> (retypeExpr e . pruneBound x)
+-- retypeExpr (Lam x e)      = Lam <$> retypeVar x <*> (retypeExpr e . pruneBound x)
+retypeExpr (Lam x e)      = Lam x <$> retypeExpr e
 retypeExpr (Let b e)      = liftA2 Let (retypeBind b) (retypeExpr e)
 retypeExpr (Case e w ty alts) =
   Case <$> (retypeExpr e)
@@ -1199,23 +1220,67 @@ retypeBind (NonRec x e) = NonRec <$> retypeVar x <*> (retypeExpr e . pruneBound 
 retypeBind (Rec ves)    =
   Rec <$> mapM (\ (x,e) -> (,) <$> retypeVar x <*> retypeExpr e) ves
 
+-- retypeAlt :: CoreAlt -> InTvM (Maybe CoreAlt)
+-- retypeAlt (con,vs0,e) = go vs0 []
+--  where
+--    go :: [Var] -> [Var] -> TvSubst -> Maybe (CoreAlt)
+--    go []     acc sub = return (con, reverse acc, retypeExpr e sub)
+--    go (v:vs) acc sub | isCoVar v && coVarRole v == Nominal
+--                        = extendTvSubstTys (coVarKind v) sub >>= go vs (v:acc)
+--                      | otherwise
+--                        = go vs (retypeVar v sub : acc) sub
+
+-- -- Gather substitutions for all of coercion variables.
+-- -- Then substitute in the parameters and the body.
+-- retypeAlt :: CoreAlt -> InTvM (Maybe CoreAlt)
+-- retypeAlt (con,vs,e) sub =
+--    do sub' <- extendTvSubstVars vs sub
+--       return (con, tyToPat (lookupTvSubst sub') <$> vs, retypeExpr e sub')
+
+-- Gather substitutions for all of coercion variables.
+-- Then substitute in the the body.
 retypeAlt :: CoreAlt -> InTvM (Maybe CoreAlt)
-retypeAlt (con,vs0,e) = go vs0 []
- where
-   go :: [Var] -> [Var] -> TvSubst -> Maybe (CoreAlt)
-   go []     acc sub = return (con, reverse acc, retypeExpr e sub)
-   go (v:vs) acc sub | isCoVar v && coVarRole v == Nominal
-                       = extendTvSubstTys (coVarKind v) sub >>= go vs (v:acc)
-                     | otherwise
-                       = go vs (retypeVar v sub : acc) sub
+retypeAlt (con,vs,e) sub =
+   do sub' <- extendTvSubstVars vs sub
+      return (con, vs, retypeExpr e sub')
+
+-- retypeAlt (con,vs,e) sub =
+--    extendTvSubstVars vs sub >>=
+--    (con,,) <$> mapM retypeVar vs <*> retypeExpr e
 
 -- TODO: Consider coercions in let and lambda.
 
 -- For now, convert coercions to universal.
 retypeCoercion :: ReTv Coercion
-retypeCoercion (coercionKind -> Pair ty ty') =
+retypeCoercion co =
     -- optCoercion emptyCvSubst <$>
-    (mkUnivCo Nominal <$> retypeType ty <*> retypeType ty')
-
+    (mkUnivCo (coercionRole co) <$> retypeType ty <*> retypeType ty')
+ where
+   Pair ty ty' = coercionKind co
 
 #endif
+
+{--------------------------------------------------------------------
+    Balanced binary trees, for type constructions
+--------------------------------------------------------------------}
+
+-- Binary leaf tree. Used to construct balanced nested sum and product types.
+data Tree a = Empty | Leaf a | Branch (Tree a) (Tree a)
+  deriving (Show,Functor,Foldable)
+
+toTree :: [a] -> Tree a
+toTree []  = Empty
+toTree [a] = Leaf a
+toTree xs  = Branch (toTree l) (toTree r)
+ where
+   (l,r) = splitAt (length xs `div` 2) xs
+
+foldMapT :: b -> (a -> b) -> Binop b -> Tree a -> b
+foldMapT e l b = h
+ where
+   h Empty        = e
+   h (Leaf a)     = l a
+   h (Branch u v) = b (h u) (h v)
+
+foldT :: a -> Binop a -> Tree a -> a
+foldT e b = foldMapT e id b
