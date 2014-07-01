@@ -25,15 +25,18 @@ module HERMIT.Extras
   ( -- * Misc
     Unop, Binop
     -- * Core utilities
+  , unsafeShowPpr
   , isType, exprType',exprTypeT, pairTy
   , tcFind0, tcFind, tcFind2
   , tcApp0, tcApp1, tcApp2
-  , isPairTC, isPairTy, isEitherTy, isUnitTy, isBoolTy
+  , isPairTC, isPairTy, isEitherTy
+  , isUnitTy, isBoolTy, isIntTy
   , onAltRhs, unliftedType
   , apps, apps', apps1', callSplitT, callNameSplitT, unCall, unCall1
   , collectForalls, subst, isTyLam, setNominalRole_maybe
   , isVarT, isLitT
   , repr, varOccCount, oneOccT, castOccsSame
+  , exprAsConApp
     -- * HERMIT utilities
   , newIdT
   , liftedKind, unliftedKind
@@ -52,7 +55,7 @@ module HERMIT.Extras
   , letFloatToProg
   , concatProgs
   , rejectR , rejectTypeR
-  , simplifyExprR, whenChangedR
+  , simplifyExprR, changedSynR, changedArrR
   , showPprT, stashLabel, tweakLabel, saveDefT, findDefT
   , unJustT, tcViewT, unFunCo
   , lamFloatCastR, castFloatLamR, castCastR, unCastCastR, castFloatAppR', castFloatCaseR, caseFloatR'
@@ -69,8 +72,10 @@ module HERMIT.Extras
   , bindUnLetIntroR, letFloatCaseAltR
   , trivialExpr, letSubstTrivialR, betaReduceTrivialR
   , pruneAltsExpr, pruneAltsR -- might remove
+  , extendTvSubstVars
   , retypeExprR
   , Tree(..), toTree, foldMapT, foldT
+  , SyntaxEq(..)
   ) where
 
 import Prelude hiding (id,(.),foldr)
@@ -101,11 +106,14 @@ import FamInstEnv (normaliseType)
 import qualified Coercion
 import OptCoercion (optCoercion)
 import Type (substTy)
+import TcType (isUnitTy,isBoolTy,isIntTy)
 
 -- import Language.KURE.Transform (apply)
 import HERMIT.Core
   ( CoreProg(..),Crumb,bindsToProg,progToBinds,freeVarsExpr
-  , exprSyntaxEq, typeSyntaxEq,CoreDef(..),defToIdExpr, coercionAlphaEq, coercionSyntaxEq )
+  , progSyntaxEq,bindSyntaxEq,defSyntaxEq,exprSyntaxEq
+  , altSyntaxEq,typeSyntaxEq,coercionSyntaxEq
+  , CoreDef(..),defToIdExpr, coercionAlphaEq,localFreeVarsExpr)
 import HERMIT.Monad
   (HermitM,HasHscEnv(..),HasHermitMEnv,getModGuts,newIdH,Label,saveDef,lookupDef,getStash)
 import HERMIT.Context
@@ -139,6 +147,10 @@ type Binop a = a -> Unop a
 {--------------------------------------------------------------------
     Core utilities
 --------------------------------------------------------------------}
+
+-- | 'showPpr' with global dynamic flags
+unsafeShowPpr :: Outputable a => a -> String
+unsafeShowPpr = showPpr unsafeGlobalDynFlags
 
 -- | Rewrite a case alternative right-hand side.
 onAltRhs :: (Functor m, Monad m) =>
@@ -203,6 +215,8 @@ isEitherTy :: Type -> Bool
 isEitherTy (TyConApp tc [_,_]) = tyConName tc == eitherTyConName
 isEitherTy _                   = False
 
+-- Found in TcType
+#if 0
 isUnitTy :: Type -> Bool
 isUnitTy (coreView -> Just t) = isUnitTy t  -- experiment
 isUnitTy (TyConApp tc [])     = tc == unitTyCon
@@ -211,6 +225,7 @@ isUnitTy _                    = False
 isBoolTy :: Type -> Bool
 isBoolTy (TyConApp tc []) = tc == boolTyCon
 isBoolTy _                = False
+#endif
 
 liftedKind :: Kind -> Bool
 liftedKind (TyConApp tc []) =
@@ -379,6 +394,13 @@ setNominalRole_maybe _ = Nothing
 #else
 
 #endif
+
+-- | Succeeds if we are looking at an application of a data constructor.
+exprAsConApp :: CoreExpr -> Maybe (DataCon, [Type], [CoreExpr])
+exprAsConApp e = exprIsConApp_maybe (in_scope, idUnfolding) e
+ where
+   in_scope =mkInScopeSet
+              (mkVarEnv [ (v,v) | v <- varSetElems (localFreeVarsExpr e) ])
 
 {--------------------------------------------------------------------
     HERMIT utilities
@@ -653,32 +675,22 @@ rejectR f = acceptR (not . f)
 rejectTypeR :: Monad m => (Type -> Bool) -> Rewrite c m CoreExpr
 rejectTypeR f = rejectR (f . exprType)
 
--- | Succeed only if the given rewrite actually changes the 
-whenChangedR :: String -> (a -> a -> Bool) -> Unop (RewriteM c a)
-whenChangedR name eq r =
-  do old <- id
-     new <- r
-     guardMsg (not (new `eq` old))
-      (name ++ ": result is unchanged from input.")
-     return new
+-- | Succeed only if the given rewrite actually changes the term
+changedSynR :: (MonadCatch m, SyntaxEq a) => Unop (Rewrite c m a)
+changedSynR = changedByR (=~=)
 
--- TODO: Replace whenChangedR with changedByR from KURE.Combinators.Transform.
+-- | Succeed only if the given rewrite actually changes the term
+changedArrR :: (MonadCatch m, SyntaxEq a) => Unop a -> Rewrite c m a
+changedArrR = changedSynR . arr
 
 -- | Use GHC expression simplifier and succeed if different. Sadly, the check
 -- gives false positives, which spoils its usefulness.
 simplifyExprR :: ReExpr
-simplifyExprR =
-  whenChangedR "simplify-expr" exprSyntaxEq $
-    prefixFailMsg "simplify-expr failed: " $
-      contextfreeT $ \ e ->
-        do dflags <- getDynFlags
-           liftIO $ simplifyExpr dflags e
-
--- TODO: Try exprSyntaxEq from HERMIT.Core:
--- 
--- exprSyntaxEq :: CoreExpr -> CoreExpr -> Bool
-
--- TODO: Maybe an EQ-like type class for comparisons.
+simplifyExprR = changedSynR $
+  prefixFailMsg "simplify-expr failed: " $
+    contextfreeT $ \ e ->
+      do dflags <- getDynFlags
+         liftIO $ simplifyExpr dflags e
 
 -- | Get a GHC pretty-printing
 showPprT :: (HasDynFlags m, Outputable a, Monad m) =>
@@ -1002,9 +1014,7 @@ normalizeTypeT = normaliseTypeT
 
 -- | Optimize a coercion.
 optimizeCoercionR :: RewriteM c Coercion
-optimizeCoercionR =
-  whenChangedR "opt-coercion" coercionSyntaxEq $
-    arr (optCoercion emptyCvSubst)
+optimizeCoercionR = changedArrR (optCoercion emptyCvSubst)
 
 -- | Optimize a cast.
 optimizeCastR :: ExtendCrumb c => RewriteM c CoreExpr
@@ -1103,11 +1113,7 @@ betaReduceTrivialR = -- watchR "betaReduceTrivialR" $
 --------------------------------------------------------------------}
 
 pruneAltsR :: ReExpr
-pruneAltsR = whenChangedR "pruneAltsR" exprSyntaxEq $
-               arr (flip pruneAltsExpr emptyTvSubst)
-
--- TODO: generalize this pattern with whenChangedR and arr.
--- Maybe have a type class for syntactic equality.
+pruneAltsR = changedArrR (flip pruneAltsExpr emptyTvSubst)
 
 type InTvM a = TvSubst -> a
 
@@ -1157,7 +1163,6 @@ extendTvSubstVar v | isCoVar v && coVarRole v == Nominal =
 extendTvSubstVars :: [Id] -> TvSubst -> Maybe TvSubst
 extendTvSubstVars = foldr (\ v q -> q <=< extendTvSubstVar v) pure
 
-
 pruneBound :: Var -> Unop TvSubst
 pruneBound v =
   fromMaybe (error "pruneBound: contradiction") . extendTvSubstVar v
@@ -1185,8 +1190,7 @@ extendTvSubstTys (a,b) sub =
 -- TODO: Make retypeFoo into a class
 
 retypeExprR :: ReExpr
-retypeExprR = whenChangedR "retypeExprR" exprSyntaxEq $
-              arr (flip retypeExpr emptyTvSubst)
+retypeExprR = changedArrR (flip retypeExpr emptyTvSubst)
 
 retypeType :: ReTv Type
 retypeType = flip substTy
@@ -1201,12 +1205,12 @@ retypeExpr (Var x)        = \ sub -> let ty  = varType x
                                      in
                                        mkCast (Var x) (mkUnivCo Representational ty ty')
 retypeExpr e@(Lit _)      = pure e
-retypeExpr (App u v)      = liftA2 App (retypeExpr u) (retypeExpr v)
+retypeExpr (App u v)      = App <$> retypeExpr u <*> retypeExpr v
 -- retypeExpr (Lam x e)      = Lam <$> retypeVar x <*> (retypeExpr e . pruneBound x)
 retypeExpr (Lam x e)      = Lam x <$> retypeExpr e
-retypeExpr (Let b e)      = liftA2 Let (retypeBind b) (retypeExpr e)
+retypeExpr (Let b e)      = Let <$> retypeBind b <*> retypeExpr e
 retypeExpr (Case e w ty alts) =
-  Case <$> (retypeExpr e)
+  Case <$> retypeExpr e
        <*> retypeVar w
        <*> retypeType ty
        <*> (catMaybes <$> mapM retypeAlt alts)
@@ -1284,3 +1288,57 @@ foldMapT e l b = h
 
 foldT :: a -> Binop a -> Tree a -> a
 foldT e b = foldMapT e id b
+
+{--------------------------------------------------------------------
+    Syntactic equality
+--------------------------------------------------------------------}
+
+-- Syntactic equality tests, taking care to check var types for change.
+
+infix 4 =~=
+class SyntaxEq a where
+  (=~=) :: a -> a -> Bool
+
+instance (SyntaxEq a, SyntaxEq b) => SyntaxEq (a,b) where
+  (a,b) =~= (a',b') = a =~= a' && b =~= b'
+
+instance (SyntaxEq a, SyntaxEq b, SyntaxEq c) => SyntaxEq (a,b,c) where
+  (a,b,c) =~= (a',b',c') = a =~= a' && b =~= b' && c =~= c'
+
+instance SyntaxEq a => SyntaxEq [a] where (=~=) = all2 (=~=)
+
+instance SyntaxEq Var      where (=~=) = varSyntaxEq'
+
+varSyntaxEq' :: Var -> Var -> Bool
+varSyntaxEq' x y = x == y && varType x =~= varType y
+
+instance SyntaxEq CoreProg where
+  ProgNil =~= ProgNil                   = True
+  ProgCons bnd1 p1 =~= ProgCons bnd2 p2 = bnd1 =~= bnd2 && p1 =~= p2
+  _  =~= _                              = False
+
+instance SyntaxEq CoreBind where
+  NonRec v1 e1 =~= NonRec v2 e2 = v1 =~= v2 && e1 =~= e2
+  Rec ies1     =~= Rec ies2     = ies1 =~= ies2
+  _            =~= _            = False
+
+instance SyntaxEq CoreDef  where
+  Def i1 e1 =~= Def i2 e2 = i1 =~= i2 && e1 =~= e2
+
+instance SyntaxEq CoreExpr where
+  Var x =~= Var y = x =~= y
+  Lit l1             =~= Lit l2             = l1 == l2
+  App f1 e1          =~= App f2 e2          = f1 =~= f2 && e1 =~= e2
+  Lam v1 e1          =~= Lam v2 e2          = v1 == v2 && e1 =~= e2
+  Let b1 e1          =~= Let b2 e2          = b1 =~= b2 && e1 =~= e2
+  Case s1 w1 ty1 as1 =~= Case s2 w2 ty2 as2 =
+    w1 == w2 && s1 =~= s2 && all2 (=~=) as1 as2 && ty1 =~= ty2
+  Cast e1 co1        =~= Cast e2 co2        = e1 =~= e2 && co1 =~= co2
+  Tick t1 e1         =~= Tick t2 e2         = t1 == t2 && e1 =~= e2
+  Type ty1           =~= Type ty2           = ty1 =~= ty2
+  Coercion co1       =~= Coercion co2       = co1 =~= co2
+  _                  =~= _                  = False
+
+instance SyntaxEq AltCon   where (=~=) = (==)
+instance SyntaxEq Type     where (=~=) = typeSyntaxEq
+instance SyntaxEq Coercion where (=~=) = coercionSyntaxEq
