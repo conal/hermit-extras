@@ -58,7 +58,8 @@ module HERMIT.Extras
   , simplifyExprR, changedSynR, changedArrR
   , showPprT, stashLabel, tweakLabel, saveDefT, findDefT
   , unJustT, tcViewT, unFunCo
-  , lamFloatCastR, castFloatLamR, castCastR, unCastCastR, castFloatAppR', castFloatCaseR, caseFloatR'
+  , lamFloatCastR, castFloatLamR, castCastR, unCastCastR
+  , castFloatAppR',castFloatAppUnivR, castFloatCaseR, caseFloatR'
   , caseWildR
   , bashExtendedWithE, bashUsingE, bashE
   , buildDictionaryT'
@@ -105,7 +106,7 @@ import SimplCore (simplifyExpr)
 import FamInstEnv (normaliseType)
 import qualified Coercion
 import OptCoercion (optCoercion)
-import Type (substTy)
+import Type (substTy,substTyWith)
 import TcType (isUnitTy,isBoolTy,isIntTy)
 
 -- import Language.KURE.Transform (apply)
@@ -800,18 +801,33 @@ castFloatAppR' = castFloatAppR <+
                  -- castFloatAppUnivR <+
                  (appAllR unCastCastR id >>> castFloatAppR')
 
--- Like castFloatApp but handles *all* coercions, and makes universal coercions.
-castFloatAppUnivR :: Monad m => Rewrite c m CoreExpr
+-- | Like castFloatApp but handles *all* coercions, and makes universal coercions.
+--   (f `cast` (co :: (a -> b) ~ (a' -> b'))) e  ==>
+--   f (e `cast` (univ :: a' ~ a)) `cast` (univ :: b ~ b')
+-- or
+--   (f `cast` (co :: (forall a. b) ~ (forall a. b'))) (Type t)  ==
+--   f e `cast` (univ :: [a := t]b ~ [a := t]b')
+castFloatAppUnivR :: MonadCatch m => Rewrite c m CoreExpr
 castFloatAppUnivR =
   do App (Cast fun co) arg <- id
      let Pair ty ty' = coercionKind co
          role = coercionRole co
-     Just (a ,b ) <- return $ splitFunTy_maybe ty
-     Just (a',b') <- return $ splitFunTy_maybe ty'
-     guardMsg (a `typeSyntaxEq` a') "castFloatAppUnivR: cast changes domain types"
-     return $
-       mkCast (App fun (mkCast arg (mkUnivCo role a' a)))
-              (mkUnivCo role b b')
+     (do Just (a ,b ) <- return $ splitFunTy_maybe ty
+         Just (a',b') <- return $ splitFunTy_maybe ty'
+         -- guardMsg (a =~= a')
+         --   "castFloatAppUnivR: cast changes domain types"
+         return $
+           mkCast (App fun (mkCast arg (mkUnivCo role a' a)))
+                  (mkUnivCo role b b'))
+      <+
+      (do Just (a ,b ) <- return $ splitForAllTy_maybe ty
+          Just (a',b') <- return $ splitForAllTy_maybe ty'
+          Type tyArg   <- return arg
+          guardMsg (a =~= a')
+            "castFloatAppUnivR: cast changes type argument"
+          return $
+            let sub = substTyWith [a] [tyArg] in
+              mkCast (App fun arg) (mkUnivCo role (sub b) (sub b')))
 
 -- | case e of p -> (rhs `cast` co)  ==> (case e of p -> rhs) `cast` co
 -- Inverse to 'caseFloatCastR', so don't use both rules!
