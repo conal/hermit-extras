@@ -58,7 +58,7 @@ module HERMIT.Extras
   , simplifyExprR, changedSynR, changedArrR
   , showPprT, stashLabel, tweakLabel, saveDefT, findDefT
   , unJustT, tcViewT, unFunCo
-  , lamFloatCastR, castFloatLamR, castCastR, unCastCastR
+  , lamFloatCastR, castFloatLamR, castCastR, unCastCastR, castTransitiveUnivR
   , castFloatAppR',castFloatAppUnivR, castFloatCaseR, caseFloatR'
   , caseWildR
   , bashExtendedWithE, bashUsingE, bashE
@@ -785,7 +785,7 @@ castFloatLamR =
 -- | cast (cast e co) co' ==> cast e (mkTransCo co co')
 castCastR :: ReExpr
 castCastR = -- labelR "castCastR" $
-            do (Cast (Cast e co) co') <- idR
+            do Cast (Cast e co) co' <- idR
                return (Cast e (mkTransCo co co'))
 
 -- e `cast` (co1 ; co2)  ==>  (e `cast` co1) `cast` co2
@@ -793,6 +793,13 @@ castCastR = -- labelR "castCastR" $
 unCastCastR :: Monad m => Rewrite c m CoreExpr
 unCastCastR = do e `Cast` (co1 `TransCo` co2) <- idR
                  return ((e `Cast` co1) `Cast` co2)
+
+-- Collapse transitive coercions when the latter is universal.
+-- TODO: Maybe re-associate.
+castTransitiveUnivR :: ReExpr
+castTransitiveUnivR =
+  do Cast e (TransCo (coercionKind -> Pair t _) (UnivCo r _ t')) <- id
+     return $ mkCast e (mkUnivCo r t t')
 
 -- Like 'castFloatAppR', but handles transitivy coercions.
 castFloatAppR' :: (MonadCatch m, ExtendCrumb c) =>
