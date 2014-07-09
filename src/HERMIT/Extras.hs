@@ -70,7 +70,8 @@ module HERMIT.Extras
   , ($*), pairT, listT, unPairR
   , externC
   , normaliseTypeT, normalizeTypeT, optimizeCoercionR, optimizeCastR
-  , bindUnLetIntroR, letFloatCaseAltR
+  , bindUnLetIntroR
+  -- , letFloatCaseAltR
   , trivialExpr, letSubstTrivialR, betaReduceTrivialR
   , pruneAltsExpr, pruneAltsR -- might remove
   , extendTvSubstVars
@@ -108,6 +109,7 @@ import qualified Coercion
 import OptCoercion (optCoercion)
 import Type (substTy,substTyWith)
 import TcType (isUnitTy,isBoolTy,isIntTy)
+import Unify (tcUnifyTy)
 
 -- import Language.KURE.Transform (apply)
 import HERMIT.Core
@@ -115,8 +117,9 @@ import HERMIT.Core
   , progSyntaxEq,bindSyntaxEq,defSyntaxEq,exprSyntaxEq
   , altSyntaxEq,typeSyntaxEq,coercionSyntaxEq
   , CoreDef(..),defToIdExpr, coercionAlphaEq,localFreeVarsExpr)
+import HERMIT.Name (newIdH)
 import HERMIT.Monad
-  (HermitM,HasHscEnv(..),HasHermitMEnv,getModGuts,newIdH,Label,saveDef,lookupDef,getStash)
+  (HermitM,HasHscEnv(..),HasHermitMEnv,getModGuts,Label,saveDef,lookupDef,getStash)
 import HERMIT.Context
   ( BoundVars(..),AddBindings(..),ReadBindings(..)
   , HasEmptyContext(..), HasCoreRules(..)
@@ -1049,6 +1052,9 @@ bindUnLetIntroR =
   do NonRec x (Let (NonRec y e) (Var ((== y) -> True))) <- id
      return (NonRec x e)
 
+-- Now in HERMIT
+#if 0
+
 -- | Float a let out of a case alternative:
 -- 
 --   case foo of { ... ; p -> let x = u in v ; ... }  ==>
@@ -1082,6 +1088,8 @@ letFloatAltR (con,vs,Let bind@(NonRec x a) body)
 letFloatAltR _ = fail "letFloatAltR: not applicable"
 
 -- TODO: consider variable occurrence conditions more carefully
+
+#endif
 
 {--------------------------------------------------------------------
     Triviality
