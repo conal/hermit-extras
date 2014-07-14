@@ -7,7 +7,7 @@
 {-# OPTIONS_GHC -Wall #-}
 
 {-# OPTIONS_GHC -fno-warn-unused-imports #-} -- TEMP
-{-# OPTIONS_GHC -fno-warn-unused-binds   #-} -- TEMP
+-- {-# OPTIONS_GHC -fno-warn-unused-binds   #-} -- TEMP
 
 ----------------------------------------------------------------------
 -- |
@@ -62,7 +62,7 @@ module HERMIT.Extras
   , castFloatAppR',castFloatAppUnivR, castFloatCaseR, caseFloatR'
   , caseWildR
   , bashExtendedWithE, bashUsingE, bashE
-  , buildDictionaryT'
+  , buildDictionaryT', buildTypeableT'
   , TransformM, RewriteM
   , repeatN
   , saveDefNoFloatT, dumpStashR, dropStashedLetR
@@ -96,7 +96,7 @@ import Data.Typeable (Typeable)
 import Control.Monad.IO.Class (MonadIO)
 import Data.Map (Map)
 import qualified Data.Map as Map
-import Data.Char (isUpper)
+import Data.Char (isUpper,isSpace)
 
 -- GHC
 import Unique(hasKey)
@@ -131,6 +131,7 @@ import HERMIT.Dictionary
   , castFloatAppR
   , caseFloatCastR, caseFloatCaseR, caseFloatAppR, caseFloatLetR
   , unshadowR, lintExprT, inScope, inlineR, buildDictionaryT
+  , buildTypeable
   , traceR
   )
 -- import HERMIT.Dictionary (traceR)
@@ -904,12 +905,30 @@ tyConApp1T ra rb h =
   do TyConApp _ [_] <- id
      tyConAppT ra (const rb) (\ a [b] -> h a b)
 
--- | Like 'buildDictionaryT' but uses 'lintExprT' to reject bogus dictionaries.
--- TODO: investigate and fix 'buildDictionaryT' instead.
-
+-- | Like 'buildDictionaryT' but simplifies with 'bashE'.
 buildDictionaryT' :: TransformH Type CoreExpr
 buildDictionaryT' = setFailMsg "Couldn't build dictionary" $
-                    tryR bashE {- . lintExprR -} . buildDictionaryT
+                    tryR bashE . buildDictionaryT
+
+-- | Build and simplify a 'Typeable' instance
+buildTypeableT' :: TransformH Type CoreExpr
+#if 0
+buildTypeableT' =
+  do ty <- id
+     tc <- findTyConT "Data.Typeable.Typeable"
+     buildDictionaryT' $* TyConApp tc [typeKind ty, ty]
+
+-- The findTyConT is failing. Hm!
+#else
+-- Adapted from buildDictionaryT
+buildTypeableT' =
+  tryR bashE .
+  prefixFailMsg "buildTypeableT failed: " (
+    contextfreeT $ \ ty ->
+     do (i,bnds) <- buildTypeable ty
+        guardMsg (notNull bnds) "no dictionary bindings generated."
+        return $ mkCoreLets bnds (varToCoreExpr i) )
+#endif
 
 -- | Repeat a rewriter exactly @n@ times.
 repeatN :: Monad m => Int -> Unop (Rewrite c m a)
