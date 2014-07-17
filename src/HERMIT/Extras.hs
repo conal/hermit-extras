@@ -119,14 +119,14 @@ import HERMIT.Core
   , CoreDef(..),defToIdExpr, coercionAlphaEq,localFreeVarsExpr)
 import HERMIT.Name (newIdH)
 import HERMIT.Monad
-  (HermitM,HasHscEnv(..),HasHermitMEnv,getModGuts,Label,saveDef,lookupDef,getStash)
+  (HermitM,HasHscEnv(..),HasHermitMEnv,getModGuts,RememberedName(..),saveDef,lookupDef,getStash)
 import HERMIT.Context
   ( BoundVars(..),AddBindings(..),ReadBindings(..)
   , HasEmptyContext(..), HasCoreRules(..)
   , HermitC )
 -- Note that HERMIT.Dictionary re-exports HERMIT.Dictionary.*
 import HERMIT.Dictionary
-  ( findIdT, callT, callNameT, simplifyR, letFloatTopR, letSubstR, betaReduceR
+  ( findIdT, findTyConT, callT, callNameT, simplifyR, letFloatTopR, letSubstR, betaReduceR
   , observeR, bracketR, bashExtendedWithR, bashUsingR, bashR, wrongExprForm
   , castFloatAppR
   , caseFloatCastR, caseFloatCaseR, caseFloatAppR, caseFloatLetR
@@ -168,7 +168,7 @@ apps :: Id -> [Type] -> [CoreExpr] -> CoreExpr
 apps f ts es
   | tyArity f /= length ts =
       error $ printf "apps: Id %s wants %d type arguments but got %d."
-                     (var2String f) arity ntys
+                     (fqVarName f) arity ntys
   | otherwise = mkApps (varToCoreExpr f) (map Type ts ++ es)
  where
    arity = tyArity f
@@ -444,6 +444,8 @@ type ReExpr = RewriteH CoreExpr
 type ReAlt  = RewriteH CoreAlt
 type ReCore = RewriteH Core
 
+#if 0
+
 -- | Lookup the name in the context first, then, failing that, in GHC's global
 -- reader environment.
 findTyConT :: String -> TransformU TyCon
@@ -460,6 +462,8 @@ findTyConMG nm _ =
                  fail $ show (length ns) 
                       ++ " matches found: "
                       ++ intercalate ", " (showPpr dynFlags <$> ns)
+
+#endif
 
 -- TODO: remove context argument, simplify OkCM, etc. See where it leads.
 -- <https://github.com/conal/type-encode/issues/2>
@@ -609,10 +613,10 @@ varLitE :: Var -> CoreExpr
 varLitE = Lit . mkMachString . uqVarName
 
 uqVarName :: Var -> String
-uqVarName = uqName . varName
+uqVarName = unqualifiedName . varName
 
 fqVarName :: Var -> String
-fqVarName = fqName . varName
+fqVarName = qualifiedName . varName
 
 -- Fully type-eta-expand, i.e., ensure that every leading forall has a matching
 -- (type) lambdas.
@@ -717,7 +721,7 @@ tweakLabel = intercalate "_" . map dropModules . words
    dropModules s = s
 
 memoChat :: (ReadBindings c, ReadCrumb c, Injection a CoreTC) =>
-            Bool -> String -> Label -> RewriteM c a
+            Bool -> String -> String -> RewriteM c a
 memoChat brag pre lab =
   if brag then
     chat ("memo " ++ pre ++ ": " ++ lab)
@@ -729,15 +733,15 @@ memoChat brag pre lab =
 
 -- | Save a definition for future use.
 saveDefT :: (ReadBindings c, ReadCrumb c) =>
-            Observing -> Label -> TransformM c CoreDef ()
+            Observing -> String -> TransformM c CoreDef ()
 saveDefT brag lab =
   do def@(Def _ e) <- id
-     constT (saveDef lab def) >>> (memoChat brag "save" lab $* e >> return ())
+     constT (saveDef (RememberedName lab) def) >>> (memoChat brag "save" lab $* e >> return ())
 
 findDefT :: (ReadBindings c, ReadCrumb c) =>
-            Observing -> Label -> TransformM c a CoreExpr
+            Observing -> String -> TransformM c a CoreExpr
 findDefT brag lab =
-  constT (defExpr <$> lookupDef lab) >>> memoChat brag "hit" lab
+  constT (defExpr <$> lookupDef (RememberedName lab)) >>> memoChat brag "hit" lab
  where
    defExpr (Def _ expr) = expr
 
@@ -984,7 +988,7 @@ progRhsAnyR r = progBindsAnyR (const (nonRecOrRecAllR id r))
 -- reifyProg = progBindsT (const (tryR reifyDef >>> letFloatToProg)) concatProgs
 -- progBindsAllR :: (ExtendPath c Crumb, ReadPath c Crumb, AddBindings c, MonadCatch m) => (Int -> Rewrite c m CoreBind) -> Rewrite c m CoreProg
 
--- NOTE: I'm converting the stash from a map over Label to a map over Id.
+-- NOTE: I'm converting the stash from a map over RememberedName to a map over Id.
 -- Look for a better way.
 
 progBound :: CoreProg -> Map Id CoreExpr
