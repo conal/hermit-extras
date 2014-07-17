@@ -905,10 +905,21 @@ tyConApp1T ra rb h =
   do TyConApp _ [_] <- id
      tyConAppT ra (const rb) (\ a [b] -> h a b)
 
+
+modFailMsgM :: MonadCatch m => (String -> m String) -> m a -> m a
+modFailMsgM f ma = ma `catchM` (fail <=< f)
+
+setFailMsgM :: MonadCatch m => m String -> m a -> m a
+setFailMsgM msgM = modFailMsgM (const msgM)
+
 -- | Like 'buildDictionaryT' but simplifies with 'bashE'.
 buildDictionaryT' :: TransformH Type CoreExpr
-buildDictionaryT' = setFailMsg "Couldn't build dictionary" $
-                    tryR bashE . buildDictionaryT
+buildDictionaryT' =
+ setFailMsgM (("Couldn't build dictionary for "++) <$> showPprT ) $
+ tryR bashE . buildDictionaryT
+
+-- buildDictionaryT' = setFailMsg "Couldn't build dictionary" $
+--                     tryR bashE . buildDictionaryT
 
 -- | Build and simplify a 'Typeable' instance
 buildTypeableT' :: TransformH Type CoreExpr
@@ -1038,21 +1049,22 @@ externC :: Injection a Core =>
 externC name rew help =
   external name (promoteR rew :: ReCore) [help]
 
--- Adapted from Andrew Farmer's code
--- | Alias for 'normalizeTypeT'.
+-- | Normalize a type, giving coercion and result type.
+-- Fails if already normalized (rather than returning 'ReflCo').
 normaliseTypeT :: (MonadIO m, HasHscEnv m, HasHermitMEnv m) =>
                   Role -> Transform c m Type (Coercion, Type)
 normaliseTypeT r = do
-  envs <- constT $ do
-    guts <- getModGuts
-    eps <- getHscEnv >>= liftIO . hscEPS 
-    return (eps_fam_inst_env eps, mg_fam_inst_env guts) 
+  envs <- constT $
+    do guts <- getModGuts
+       eps <- getHscEnv >>= liftIO . hscEPS 
+       return (eps_fam_inst_env eps, mg_fam_inst_env guts) 
   res@(co,_) <- arr (normaliseType envs r)
   guardMsg (not (isReflCo co)) "normaliseTypeT: already normal"
   return res
 
--- | Normalize a type, giving coercion and result type.
--- Fails if already normalized (rather than returning 'ReflCo').
+-- Adapted from Andrew Farmer's code.
+
+-- | Alias for 'normalizeTypeT'.
 normalizeTypeT :: (MonadIO m, HasHscEnv m, HasHermitMEnv m) =>
                   Role -> Transform c m Type (Coercion, Type)
 normalizeTypeT = normaliseTypeT
