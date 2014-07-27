@@ -73,7 +73,7 @@ module HERMIT.Extras
   , bindUnLetIntroR
   -- , letFloatCaseAltR
   , trivialExpr, letSubstTrivialR, betaReduceTrivialR
-  , pruneAltsExpr, pruneAltsR -- might remove
+  -- , pruneAltsExpr, pruneAltsR -- might remove
   , extendTvSubstVars
   , retypeExprR
   , Tree(..), toTree, foldMapT, foldT
@@ -1178,12 +1178,36 @@ betaReduceTrivialR = -- watchR "betaReduceTrivialR" $
     Case alternative pruning
 --------------------------------------------------------------------}
 
-pruneAltsR :: ReExpr
-pruneAltsR = changedArrR (flip pruneAltsExpr emptyTvSubst)
-
 type InTvM a = TvSubst -> a
 
 type ReTv a = a -> InTvM a
+
+pruneBound :: Var -> Unop TvSubst
+pruneBound v =
+  fromMaybe (error "pruneBound: contradiction") . extendTvSubstVar v
+
+extendTvSubstVar :: Var -> InTvM (Maybe TvSubst)
+extendTvSubstVar v | isCoVar v && coVarRole v == Nominal =
+                      extendTvSubstTys (coVarKind v)
+                   | otherwise = pure
+
+extendTvSubstVars :: [Id] -> TvSubst -> Maybe TvSubst
+extendTvSubstVars = foldr (\ v q -> q <=< extendTvSubstVar v) pure
+
+extendTvSubstTys :: (Type,Type) -> TvSubst -> Maybe TvSubst
+extendTvSubstTys (a,b) sub =
+  unionTvSubst sub <$> tcUnifyTy (substTy sub a) (substTy sub b)
+
+-- TODO: Can I really use unionTvSubst here? Note comment "Works when the ranges
+-- are disjoint"
+
+-- TODO: Maybe use normaliseType and check that the resulting coercion is
+-- nominal TODO: Handle Representational coercions?
+
+#if 0
+
+pruneAltsR :: ReExpr
+pruneAltsR = changedArrR (flip pruneAltsExpr emptyTvSubst)
 
 pruneAltsExpr :: ReTv CoreExpr
 pruneAltsExpr e@(Var _)      = pure e
@@ -1221,29 +1245,7 @@ pruneAltsAlt (con,vs0,e) =
 -- TvSubst. What do I do for pruneAltsExpr etc if a lambda binding proves
 -- impossible? What about a let binding?
 
-extendTvSubstVar :: Var -> InTvM (Maybe TvSubst)
-extendTvSubstVar v | isCoVar v && coVarRole v == Nominal =
-                      extendTvSubstTys (coVarKind v)
-                   | otherwise = pure
-
-extendTvSubstVars :: [Id] -> TvSubst -> Maybe TvSubst
-extendTvSubstVars = foldr (\ v q -> q <=< extendTvSubstVar v) pure
-
-pruneBound :: Var -> Unop TvSubst
-pruneBound v =
-  fromMaybe (error "pruneBound: contradiction") . extendTvSubstVar v
-
-extendTvSubstTys :: (Type,Type) -> TvSubst -> Maybe TvSubst
-extendTvSubstTys (a,b) sub =
-  unionTvSubst sub <$> tcUnifyTy (substTy sub a) (substTy sub b)
-
--- TODO: Can I really use unionTvSubst here? Note comment "Works when the ranges
--- are disjoint"
-
--- TODO: Maybe use normaliseType and check that the resulting coercion is
--- nominal TODO: Handle Representational coercions?
-
-#if 1
+#else
 
 {--------------------------------------------------------------------
     Type localization
@@ -1254,6 +1256,8 @@ extendTvSubstTys (a,b) sub =
 -- Subsumes pruneAlt*
 
 -- TODO: Make retypeFoo into a class
+
+-- TODO: Still needed?
 
 retypeExprR :: ReExpr
 retypeExprR = changedArrR (flip retypeExpr emptyTvSubst)
