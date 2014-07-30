@@ -46,7 +46,7 @@ module HERMIT.Extras
   , isTypeE, isCastE, isDictE, isCoercionE
   , mkUnit, mkPair, mkLeft, mkRight, mkEither
   , InCoreTC
-  , Observing, observeR', tries, triesL, labeled
+  , Observing, observeR', tries, triesL, scopeR, labeled
   , lintExprR -- , lintExprDieR
   , lintingExprR
   , varLitE, uqVarName, fqVarName, typeEtaLong, simplifyE
@@ -547,12 +547,11 @@ triesL :: (ReadBindings c, ReadCrumb c, InCoreTC t) =>
           Observing -> [(String,RewriteM c t)] -> RewriteM c t
 triesL observing = tries . map (labeled observing)
 
-#ifdef WatchFailures
-scopeR :: InCoreTC a => String -> Unop (RewriteM c a)
+-- scopeR :: InCoreTC a => String -> Unop (RewriteM c a)
+scopeR :: String -> Unop (TransformM c a b)
 scopeR label r = traceR ("Try " ++ label ) >>>
                  -- r
                  (r <+ (traceR (label ++ " failed") >>> fail "scopeR"))
-#endif
 
 labeled :: (ReadBindings c, ReadCrumb c, InCoreTC a) =>
            Observing -> (String, RewriteM c a) -> RewriteM c a
@@ -920,7 +919,7 @@ setFailMsgM msgM = modFailMsgM (const msgM)
 buildDictionaryT' :: TransformH Type CoreExpr
 buildDictionaryT' =
  setFailMsgM (("Couldn't build dictionary for "++) <$> showPprT ) $
- tryR bashE . buildDictionaryT
+   tryR bashE . buildDictionaryT -- . observeR "buildDictionaryT'"
 
 -- buildDictionaryT' = setFailMsg "Couldn't build dictionary" $
 --                     tryR bashE . buildDictionaryT
