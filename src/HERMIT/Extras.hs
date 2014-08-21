@@ -78,6 +78,7 @@ module HERMIT.Extras
   , retypeExprR
   , Tree(..), toTree, foldMapT, foldT
   , SyntaxEq(..)
+  , regularizeType
   ) where
 
 import Prelude hiding (id,(.),foldr)
@@ -1411,3 +1412,12 @@ instance SyntaxEq CoreExpr where
 instance SyntaxEq AltCon   where (=~=) = (==)
 instance SyntaxEq Type     where (=~=) = typeSyntaxEq
 instance SyntaxEq Coercion where (=~=) = coercionSyntaxEq
+
+regularizeType :: Unop Type
+regularizeType (coreView -> Just ty) = regularizeType ty
+regularizeType ty@(TyVarTy _)        = ty
+regularizeType (AppTy u v)           = AppTy (regularizeType u) (regularizeType v)
+regularizeType (TyConApp tc tys)     = TyConApp tc (regularizeType <$> tys)
+regularizeType (FunTy u v)           = FunTy (regularizeType u) (regularizeType v)
+regularizeType (ForAllTy x ty)       = ForAllTy x (regularizeType ty)
+regularizeType ty@(LitTy _)          = ty
