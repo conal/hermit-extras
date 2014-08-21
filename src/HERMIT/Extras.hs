@@ -2,6 +2,7 @@
 {-# LANGUAGE FlexibleContexts, FlexibleInstances, MultiParamTypeClasses #-}
 {-# LANGUAGE ScopedTypeVariables, TupleSections #-}
 {-# LANGUAGE DeriveDataTypeable, DeriveFunctor, DeriveFoldable, TypeFamilies #-}
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE UndecidableInstances #-} -- see below
 -- {-# LANGUAGE BangPatterns #-}
 {-# OPTIONS_GHC -Wall #-}
@@ -38,6 +39,7 @@ module HERMIT.Extras
   , repr, varOccCount, oneOccT, castOccsSame
   , exprAsConApp
     -- * HERMIT utilities
+  , moduledName
   , newIdT
   , liftedKind, unliftedKind
   , ReType, ReExpr, ReBind, ReAlt, ReProg, ReCore
@@ -98,6 +100,7 @@ import Control.Monad.IO.Class (MonadIO)
 import Data.Map (Map)
 import qualified Data.Map as Map
 import Data.Char (isUpper,isSpace)
+import Data.String (fromString)
 
 -- GHC
 import Unique(hasKey)
@@ -139,6 +142,7 @@ import HERMIT.Dictionary
 import HERMIT.GHC hiding (FastString(..),(<>),substTy)
 import HERMIT.Kure hiding (apply)
 import HERMIT.External (External,Extern(..),external,ExternalName)
+import HERMIT.Name (HermitName)
 
 {--------------------------------------------------------------------
     Misc
@@ -431,11 +435,11 @@ type TransformM c a b = Transform c HermitM a b
 type RewriteM c a = TransformM c a a
 
 -- Apply a named id to type and value arguments.
-apps' :: String -> [Type] -> [CoreExpr] -> TransformU CoreExpr
+apps' :: HermitName -> [Type] -> [CoreExpr] -> TransformU CoreExpr
 apps' s ts es = (\ i -> apps i ts es) <$> findIdT s
 
 -- Apply a named id to type and value arguments.
-apps1' :: String -> [Type] -> CoreExpr -> TransformU CoreExpr
+apps1' :: HermitName -> [Type] -> CoreExpr -> TransformU CoreExpr
 apps1' s ts = apps' s ts . (:[])
 
 type ReType = RewriteH Type
@@ -471,13 +475,13 @@ findTyConMG nm _ =
 
 -- TODO: Use findTyConT in HERMIT.Dictionary.Name instead of above.
 
-tcFind :: (TyCon -> b) -> String -> TransformU b
+tcFind :: (TyCon -> b) -> HermitName -> TransformU b
 tcFind h = fmap h . findTyConT
 
-tcFind0 :: String -> TransformU Type
+tcFind0 :: HermitName -> TransformU Type
 tcFind0 = tcFind tcApp0
 
-tcFind2 :: String -> TransformU (Binop Type)
+tcFind2 :: HermitName -> TransformU (Binop Type)
 tcFind2 = tcFind tcApp2
 
 callSplitT :: MonadCatch m =>
@@ -489,7 +493,7 @@ callSplitT = do (f,args) <- callT
 callNameSplitT ::
   ( MonadCatch m, MonadIO m, MonadThings m, HasHscEnv m, HasHermitMEnv m
   , BoundVars c ) =>
-  String -> Transform c m CoreExpr (CoreExpr, [Type], [Expr CoreBndr])
+  HermitName -> Transform c m CoreExpr (CoreExpr, [Type], [Expr CoreBndr])
 callNameSplitT name = do (f,args) <- callNameT name
                          let (tyArgs,valArgs) = splitTysVals args
                          return (f,tyArgs,valArgs)
@@ -499,12 +503,12 @@ callNameSplitT name = do (f,args) <- callNameT name
 -- | Uncall a named function
 unCall ::  ( MonadCatch m, MonadIO m, MonadThings m, HasHscEnv m, HasHermitMEnv m
            , BoundVars c ) =>
-           String -> Transform c m CoreExpr [CoreExpr]
+           HermitName -> Transform c m CoreExpr [CoreExpr]
 unCall f = do (_f,_tys,args) <- callNameSplitT f
               return args
 
 -- | Uncall a named function of one value argument, dropping initial type args.
-unCall1 :: String -> ReExpr
+unCall1 :: HermitName -> ReExpr
 unCall1 f = do [e] <- unCall f
                return e
 
@@ -514,8 +518,11 @@ mkUnit = return (mkCoreTup [])
 mkPair :: TransformU (Binop CoreExpr)
 mkPair = return $ \ u v  -> mkCoreTup [u,v]
 
-eitherName :: Unop String
-eitherName = ("Data.Either." ++)
+moduledName :: String -> String -> HermitName
+moduledName modName = fromString . (modName ++) . ('.' :)
+
+eitherName :: String -> HermitName
+eitherName = moduledName "Data.Either"
 
 mkLR :: String -> TransformU (Type -> Type -> Unop CoreExpr)
 mkLR name = do f <- findIdT (eitherName name)

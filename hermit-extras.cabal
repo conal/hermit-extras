@@ -23,7 +23,7 @@ Library
                   , containers
                   , transformers
                   , kure   >= 2.16.0
-                  , hermit >= 0.4.0.0
+                  , hermit >= 0.5.0.1
   Exposed-Modules:
                     HERMIT.Extras
 
