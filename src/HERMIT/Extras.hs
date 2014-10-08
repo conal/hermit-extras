@@ -32,7 +32,7 @@ module HERMIT.Extras
   , tcApp0, tcApp1, tcApp2
   , isPairTC, isPairTy, isEitherTy
   , isUnitTy, isBoolTy, isIntTy
-  , onAltRhs, unliftedType
+  , onCaseAlts, onAltRhs, unliftedType
   , apps, apps', apps1', callSplitT, callNameSplitT, unCall, unCall1
   , collectForalls, subst, isTyLam, setNominalRole_maybe
   , isVarT, isLitT
@@ -161,6 +161,10 @@ type Binop a = a -> Unop a
 -- | 'showPpr' with global dynamic flags
 unsafeShowPpr :: Outputable a => a -> String
 unsafeShowPpr = showPpr unsafeGlobalDynFlags
+
+onCaseAlts :: (ExtendCrumb c, ReadCrumb c, AddBindings c, Monad m) =>
+              Rewrite c m CoreAlt -> Rewrite c m CoreExpr
+onCaseAlts r = caseAllR id id id (const r)
 
 -- | Rewrite a case alternative right-hand side.
 onAltRhs :: (Functor m, Monad m) =>
@@ -926,8 +930,9 @@ setFailMsgM msgM = modFailMsgM (const msgM)
 -- | Like 'buildDictionaryT' but simplifies with 'bashE'.
 buildDictionaryT' :: TransformH Type CoreExpr
 buildDictionaryT' =
- setFailMsgM (("Couldn't build dictionary for "++) <$> showPprT ) $
-   tryR bashE . buildDictionaryT -- . observeR "buildDictionaryT'"
+ {- observeR "buildDictionaryT' (pre)" >>> -}
+   ( setFailMsgM (("Couldn't build dictionary for "++) <$> showPprT ) $
+       tryR bashE . {- scopeR "buildDictionaryT" -} buildDictionaryT )
 
 -- buildDictionaryT' = setFailMsg "Couldn't build dictionary" $
 --                     tryR bashE . buildDictionaryT
