@@ -64,7 +64,7 @@ module HERMIT.Extras
   , castFloatAppR',castFloatAppUnivR, castFloatCaseR, caseFloatR'
   , caseWildR
   , bashExtendedWithE, bashUsingE, bashE
-  , buildDictionaryT', buildTypeableT'
+  , buildDictionaryT', buildTypeableT', simpleDict
   , TransformM, RewriteM
   , repeatN
   , saveDefNoFloatT, dumpStashR, dropStashedLetR
@@ -936,6 +936,16 @@ buildDictionaryT' =
 
 -- buildDictionaryT' = setFailMsg "Couldn't build dictionary" $
 --                     tryR bashE . buildDictionaryT
+
+simpleDict :: HermitName -> TransformH Type CoreExpr
+simpleDict name =
+  do tc <- findTyConT name
+     buildDictionaryT' . arr (tcApp1 tc)
+
+-- simpleDict name =
+--   do tc <- findTyConT name
+--      ty <- idR
+--      buildDictionaryT' $* TyConApp tc [ty]
 
 -- | Build and simplify a 'Typeable' instance
 buildTypeableT' :: TransformH Type CoreExpr
