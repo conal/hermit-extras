@@ -3,7 +3,9 @@ To do: offer to HERMIT folks for inclusion.
 
 Requires GHC 7.8.2 or later.
 
-Assumes some old versions of KU software, so I've cloned them.
+Assumes some old versions of KU software:
 
-*   [KURE](https://github.com/conal/kure)
-*   [HERMIT](https://github.com/conal/hermit)
+*   [KURE](https://github.com/ku-fpg/kure), commit `7ce26aa`
+*   [HERMIT](https://github.com/ku-fpg/hermit), commit `543ccb8`
+
+To use these versions, clone the repos (or pull if already cloned), and use "git checkout <commit-id>".
