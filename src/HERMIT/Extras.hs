@@ -90,7 +90,7 @@ import Control.Category (Category(..),(>>>))
 import Data.Functor ((<$>),(<$))
 import Data.Foldable (Foldable(..))
 import Control.Applicative (Applicative(..),liftA2,(<|>))
-import Control.Monad ((<=<))
+import Control.Monad ((<=<),unless)
 import Control.Arrow (Arrow(..))
 import Data.Maybe (catMaybes,fromMaybe)
 import Data.List (intercalate,isPrefixOf)
@@ -200,7 +200,7 @@ exprTypeT :: Monad m => Transform c m CoreExpr Type
 exprTypeT =
   do e <- idR
      guardMsg (not (isType e)) "exprTypeT: given a Type"
-     return (exprType e)
+     return (exprType' e)
 
 isType :: CoreExpr -> Bool
 isType (Type {}) = True
@@ -599,16 +599,34 @@ lintingExprR :: ( ReadBindings c, ReadCrumb c
 lintingExprR msg rr =
   do e  <- idR
      e' <- rr'
-     res <- attemptM (return e' >>> lintExprT)
-     either (\ lintMsg -> return e >>>
-                          bracketR msg rr' >>>
-                          error lintMsg
-                          -- traceR lintMsg
+     res <- attemptM (lintExprT $* e')
+     either (\ lintMsg -> do _ <- bracketR ("Lint check " ++ msg) rr' $* e
+                             error ("Lint failure: " ++ lintMsg)
+                             -- traceR lintMsg
             )
-            (const (return e'))
+            (const $ do unless (isType e || isType e') (
+                          do let t  = exprType' e 
+                                 t' = exprType' e'
+                             unless (True || t `eqType` t') $ -- See 2015-11-27 notes
+                               do _ <- bracketR ("Type changed! " ++ msg) rr' $* e
+                                  st  <- showPprT $* t
+                                  st' <- showPprT $* t'
+                                  error (printf "OOPS! Type changed.\n  Old: %s\n  New: %s"
+                                          (dropModules st) (dropModules st')))
+                        return e')
             res
  where
    rr' = rr >>> extractR (tryR unshadowR)
+
+-- -- Lint both before and after
+-- lintingExprR2 :: ( ReadBindings c, ReadCrumb c
+--                  , BoundVars c, AddBindings c, ExtendCrumb c, HasEmptyContext c  -- for unshadowR
+--                  ) =>
+--                  String -> Unop (Rewrite c HermitM CoreExpr)
+-- lintingExprR2 msg rr =
+--   lintingExprR ("Before " ++ msg) id >> lintingExprR ("After " ++ msg) rr
+
+-- TODO: Compare types before and after.
 
 -- TODO: Eliminate labeled.
 
@@ -639,7 +657,7 @@ typeEtaLong = readerT $ \ e ->
                    expand
  where
    -- Eta-expand enough for lambdas to match foralls.
-   expand = do e@(collectForalls . exprType -> (tvs,_)) <- idR
+   expand = do e@(collectForalls . exprType' -> (tvs,_)) <- idR
                return $ mkLams tvs (mkApps e ((Type . TyVarTy) <$> tvs))
 
 simplifyE :: ReExpr
@@ -693,7 +711,7 @@ rejectR f = acceptR (not . f)
 
 -- | Reject if condition holds on an expression's type.
 rejectTypeR :: Monad m => (Type -> Bool) -> Rewrite c m CoreExpr
-rejectTypeR f = rejectR (f . exprType)
+rejectTypeR f = rejectR (f . exprType')
 
 -- | Succeed only if the given rewrite actually changes the term
 changedSynR :: (MonadCatch m, SyntaxEq a) => Unop (Rewrite c m a)
@@ -724,12 +742,16 @@ stashLabel :: (Functor m, Monad m, HasDynFlags m, Outputable a) =>
               Transform c m a String
 stashLabel = tweakLabel <$> showPprT
 
+-- Replace whitespace runs with underscores
 tweakLabel :: Unop String
-tweakLabel = intercalate "_" . map dropModules . words
+tweakLabel = intercalate "_" . words
+
+dropModules :: Unop String
+dropModules = unwords . map dropMods . words
  where
-   dropModules (c:rest) | not (isUpper c) = c : dropModules rest
-   dropModules (break (== '.') -> (_,'.':rest)) = dropModules rest
-   dropModules s = s
+   dropMods (c:rest) | not (isUpper c) = c : dropMods rest
+   dropMods (break (== '.') -> (_,'.':rest)) = dropMods rest
+   dropMods s = s
 
 memoChat :: (ReadBindings c, ReadCrumb c, Injection a CoreTC) =>
             Bool -> String -> String -> RewriteM c a
@@ -760,7 +782,7 @@ saveDefNoFloatT :: (ReadBindings c, ReadCrumb c) =>
                    Observing -> String -> TransformM c CoreExpr ()
 saveDefNoFloatT brag lab =
   do e <- id
-     v <- newIdT bogusDefName $* exprType e
+     v <- newIdT bogusDefName $* exprType' e
      saveDefT brag lab $* Def v e
 
 -- | unJust as transform. Fails on Nothing.
@@ -937,15 +959,14 @@ buildDictionaryT' =
 -- buildDictionaryT' = setFailMsg "Couldn't build dictionary" $
 --                     tryR bashE . buildDictionaryT
 
-simpleDict :: HermitName -> TransformH Type CoreExpr
+-- Try again but with multiple type arguments.
+simpleDict :: HermitName -> TransformH [Type] CoreExpr
 simpleDict name =
   do tc <- findTyConT name
-     buildDictionaryT' . arr (tcApp1 tc)
+     buildDictionaryT' . arr (TyConApp tc)
 
--- simpleDict name =
---   do tc <- findTyConT name
---      ty <- idR
---      buildDictionaryT' $* TyConApp tc [ty]
+-- simpleDict1 :: HermitName -> TransformH Type CoreExpr
+-- simpleDict1 name = simpleDict name . arr (:[])
 
 -- | Build and simplify a 'Typeable' instance
 buildTypeableT' :: TransformH Type CoreExpr
