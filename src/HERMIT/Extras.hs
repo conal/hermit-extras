@@ -607,7 +607,7 @@ lintingExprR msg rr =
             (const $ do unless (isType e || isType e') (
                           do let t  = exprType' e 
                                  t' = exprType' e'
-                             unless (True || t `eqType` t') $ -- See 2015-11-27 notes
+                             unless ({- True || -} t `eqType` t') $ -- See 2015-11-27 notes
                                do _ <- bracketR ("Type changed! " ++ msg) rr' $* e
                                   st  <- showPprT $* t
                                   st' <- showPprT $* t'
