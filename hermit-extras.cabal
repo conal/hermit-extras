@@ -1,5 +1,5 @@
 Name:               hermit-extras
-Version:            0.2.2
+Version:            0.3.0
 Cabal-Version:      >= 1.6
 Synopsis:           Some helpers for GHC Core and HERMIT
 Category:           Language
@@ -23,7 +23,7 @@ Library
                   , containers
                   , transformers
                   , kure   >= 2.16.0
-                  , hermit >= 0.5.0.1
+                  , hermit >= 1.0.0.1
   Exposed-Modules:
                     HERMIT.Extras
 
