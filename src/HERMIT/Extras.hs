@@ -8,7 +8,7 @@
 {-# OPTIONS_GHC -Wall #-}
 
 {-# OPTIONS_GHC -fno-warn-unused-imports #-} -- TEMP
--- {-# OPTIONS_GHC -fno-warn-unused-binds   #-} -- TEMP
+{-# OPTIONS_GHC -fno-warn-unused-binds   #-} -- TEMP
 
 ----------------------------------------------------------------------
 -- |
@@ -35,8 +35,11 @@ module HERMIT.Extras
   , onCaseAlts, onAltRhs, unliftedType
   , apps, apps', apps1', callSplitT, callNameSplitT, unCall, unCall1
   , collectForalls, subst, isTyLam, setNominalRole_maybe
-  , isVarT, isLitT
-  , repr, varOccCount, oneOccT, castOccsSame
+  , isVarT, isLitT, isWorker, isWorkerT
+  , repr
+{-
+  , varOccCount, oneOccT, castOccsSame
+-}
   , exprAsConApp
     -- * HERMIT utilities
   , moduledName
@@ -58,19 +61,23 @@ module HERMIT.Extras
   , concatProgs
   , rejectR , rejectTypeR
   , simplifyExprR, changedSynR, changedArrR
-  , showPprT, stashLabel, tweakLabel, saveDefT, findDefT
+  , showPprT, stashLabel, tweakLabel
+{-
+  , saveDefT, findDefT
+  , saveDefNoFloatT, dumpStashR, dropStashedLetR
+-}
   , unJustT, tcViewT, unFunCo
-  , lamFloatCastR, castFloatLamR, castCastR, unCastCastR, castTransitiveUnivR
-  , castFloatAppR',castFloatAppUnivR, castFloatCaseR, caseFloatR'
-  , caseWildR
+  , lamFloatCastR{-, castFloatLamR-}, castCastR, unCastCastR, castTransitiveUnivR
+  , castFloatAppR',castFloatAppUnivR, castFloatCaseR, castFloatApps
+  , caseFloatR', caseWildR
   , bashExtendedWithE, bashUsingE, bashE
+--   , bashExtendedWithE', bashR', bashE'
   , buildDictionaryT', buildTypeableT', simpleDict
   , TransformM, RewriteM
   , repeatN
-  , saveDefNoFloatT, dumpStashR, dropStashedLetR
   , progRhsAnyR
   , ($*), pairT, listT, unPairR
-  , externC
+  , externC, externC'
   , normaliseTypeT, normalizeTypeT, optimizeCoercionR, optimizeCastR
   , bindUnLetIntroR
   -- , letFloatCaseAltR
@@ -114,6 +121,7 @@ import OptCoercion (optCoercion)
 import Type (substTy,substTyWith)
 import TcType (isUnitTy,isBoolTy,isIntTy)
 import Unify (tcUnifyTy)
+-- import TyCoRep ()
 
 -- import Language.KURE.Transform (apply)
 import HERMIT.Core
@@ -121,28 +129,33 @@ import HERMIT.Core
   , progSyntaxEq,bindSyntaxEq,defSyntaxEq,exprSyntaxEq
   , altSyntaxEq,typeSyntaxEq,coercionSyntaxEq
   , CoreDef(..),defToIdExpr, coercionAlphaEq,localFreeVarsExpr)
-import HERMIT.Name (newIdH)
+import HERMIT.Name (newIdH,mkQualified)
 import HERMIT.Monad
-  (HermitM,HasHscEnv(..),HasHermitMEnv,getModGuts,RememberedName(..),saveDef,lookupDef,getStash)
+  (HermitM,HasHermitMEnv,getModGuts,LiftCoreM,getHscEnv)
 import HERMIT.Context
   ( BoundVars(..),AddBindings(..),ReadBindings(..)
   , HasEmptyContext(..), HasCoreRules(..)
-  , HermitC )
+  , HermitC, LemmaContext )
 -- Note that HERMIT.Dictionary re-exports HERMIT.Dictionary.*
 import HERMIT.Dictionary
   ( findIdT, findTyConT, callT, callNameT, simplifyR, letFloatTopR, letSubstR, betaReduceR
-  , observeR, bracketR, bashExtendedWithR, bashUsingR, bashR, wrongExprForm
-  , castFloatAppR
+  , observeR, bracketR, bashExtendedWithR, bashUsingR, bashR, bashComponents
+  , wrongExprForm
+  , castFloatAppR, castFloatLamR
   , caseFloatCastR, caseFloatCaseR, caseFloatAppR, caseFloatLetR
-  , unshadowR, lintExprT, inScope, inlineR, buildDictionaryT
+  , unshadowR, lintExprT{-, inScope-}, inlineR, buildDictionaryT
+  , unfoldPredR
   , buildTypeable
   , traceR
+  -- Remembered
+  , rememberR, unfoldRememberedR
   )
 -- import HERMIT.Dictionary (traceR)
 import HERMIT.GHC hiding (FastString(..),(<>),substTy)
-import HERMIT.Kure hiding (apply)
+import HERMIT.Kure hiding (apply,(<$>),(<*>))
 import HERMIT.External (External,Extern(..),external,ExternalName)
 import HERMIT.Name (HermitName)
+import HERMIT.Lemma (Used(..))
 
 {--------------------------------------------------------------------
     Misc
@@ -229,18 +242,6 @@ isEitherTy :: Type -> Bool
 isEitherTy (TyConApp tc [_,_]) = tyConName tc == eitherTyConName
 isEitherTy _                   = False
 
--- Found in TcType
-#if 0
-isUnitTy :: Type -> Bool
-isUnitTy (coreView -> Just t) = isUnitTy t  -- experiment
-isUnitTy (TyConApp tc [])     = tc == unitTyCon
-isUnitTy _                    = False
-
-isBoolTy :: Type -> Bool
-isBoolTy (TyConApp tc []) = tc == boolTyCon
-isBoolTy _                = False
-#endif
-
 liftedKind :: Kind -> Bool
 liftedKind (TyConApp tc []) =
   any (tc `hasKey`) [liftedTypeKindTyConKey, constraintKindTyConKey]
@@ -290,11 +291,11 @@ isLitT :: (Monad m, ExtendCrumb c) =>
           Transform c m CoreExpr ()
 isLitT = litT successT
 
-#if __GLASGOW_HASKELL__ < 709
-
 -- | Abbreviation for the 'Representational' role
 repr :: Role
 repr = Representational
+
+#if __GLASGOW_HASKELL__ < 709
 
 -- | Number of occurrences of a non-type variable
 varOccCount :: Var -> CoreExpr -> Int
@@ -429,9 +430,14 @@ newIdT nm = do ty <- id
 --   ( HasDynFlags m, Functor m, MonadThings m, MonadCatch m
 --   , BoundVars c, HasModGuts m )
 
-type OkCM c m = 
-  ( BoundVars c, HasDynFlags m, HasHscEnv m, HasHermitMEnv m
-  , Functor m, MonadCatch m, MonadIO m, MonadThings m )
+-- type OkCM c m = 
+--   ( BoundVars c, HasDynFlags m, HasHscEnv m, HasHermitMEnv m
+--   , Functor m, MonadCatch m, MonadIO m, MonadThings m )
+
+type OkCM c m =
+  ( BoundVars c
+  , MonadCatch m, MonadIO m, MonadThings m, HasHermitMEnv m, LiftCoreM m
+  )
 
 type TransformU b = forall c m a. OkCM c m => Transform c m a b
 
@@ -446,12 +452,13 @@ apps' s ts es = (\ i -> apps i ts es) <$> findIdT s
 apps1' :: HermitName -> [Type] -> CoreExpr -> TransformU CoreExpr
 apps1' s ts = apps' s ts . (:[])
 
-type ReType = RewriteH Type
-type ReProg = RewriteH CoreProg
-type ReBind = RewriteH CoreBind
-type ReExpr = RewriteH CoreExpr
-type ReAlt  = RewriteH CoreAlt
-type ReCore = RewriteH Core
+type ReType  = RewriteH Type
+type ReProg  = RewriteH CoreProg
+type ReBind  = RewriteH CoreBind
+type ReExpr  = RewriteH CoreExpr
+type ReAlt   = RewriteH CoreAlt
+type ReCore  = RewriteH Core
+type ReLCore = RewriteH LCore
 
 #if 0
 
@@ -494,9 +501,7 @@ callSplitT = do (f,args) <- callT
                 let (tyArgs,valArgs) = splitTysVals args
                 return (f,tyArgs,valArgs)
 
-callNameSplitT ::
-  ( MonadCatch m, MonadIO m, MonadThings m, HasHscEnv m, HasHermitMEnv m
-  , BoundVars c ) =>
+callNameSplitT :: OkCM c m =>
   HermitName -> Transform c m CoreExpr (CoreExpr, [Type], [Expr CoreBndr])
 callNameSplitT name = do (f,args) <- callNameT name
                          let (tyArgs,valArgs) = splitTysVals args
@@ -505,9 +510,7 @@ callNameSplitT name = do (f,args) <- callNameT name
 -- TODO: refactor with something like HERMIT's callPredT
 
 -- | Uncall a named function
-unCall ::  ( MonadCatch m, MonadIO m, MonadThings m, HasHscEnv m, HasHermitMEnv m
-           , BoundVars c ) =>
-           HermitName -> Transform c m CoreExpr [CoreExpr]
+unCall ::  OkCM c m => HermitName -> Transform c m CoreExpr [CoreExpr]
 unCall f = do (_f,_tys,args) <- callNameSplitT f
               return args
 
@@ -523,7 +526,8 @@ mkPair :: TransformU (Binop CoreExpr)
 mkPair = return $ \ u v  -> mkCoreTup [u,v]
 
 moduledName :: String -> String -> HermitName
-moduledName modName = fromString . (modName ++) . ('.' :)
+-- moduledName modName = fromString . (modName ++) . ('.' :)
+moduledName = mkQualified  -- Now exported from HERMIT.Name
 
 eitherName :: String -> HermitName
 eitherName = moduledName "Data.Either"
@@ -541,12 +545,12 @@ mkRight = mkLR "Right"
 mkEither :: TransformU (Binop Type)
 mkEither = tcFind2 (eitherName "Either")
 
-type InCoreTC t = Injection t CoreTC
+type InCoreTC t = Injection t LCoreTC
 
 -- Whether we're observing rewrites
 type Observing = Bool
 
-observeR' :: (ReadBindings c, ReadCrumb c) =>
+observeR' :: (ReadBindings c, ReadCrumb c, LemmaContext c) =>
              Observing -> InCoreTC t => String -> RewriteM c t
 observeR' True  = observeR
 observeR' False = const idR
@@ -555,7 +559,7 @@ tries :: (MonadCatch m, InCoreTC t) =>
          [Rewrite c m t] -> Rewrite c m t
 tries = foldr (<+) ({- observeR' "Unhandled" >>> -} fail "unhandled")
 
-triesL :: (ReadBindings c, ReadCrumb c, InCoreTC t) =>
+triesL :: (ReadBindings c, ReadCrumb c, LemmaContext c, InCoreTC t) =>
           Observing -> [(String,RewriteM c t)] -> RewriteM c t
 triesL observing = tries . map (labeled observing)
 
@@ -565,9 +569,10 @@ scopeR label r = traceR ("Try " ++ label ) >>>
                  -- r
                  (r <+ (traceR (label ++ " failed") >>> fail "scopeR"))
 
-labeled :: (ReadBindings c, ReadCrumb c, InCoreTC a) =>
+labeled :: (ReadBindings c, ReadCrumb c, LemmaContext c, InCoreTC a) =>
            Observing -> (String, RewriteM c a) -> RewriteM c a
 labeled observing (label,r) =
+  prefixFailMsg (label ++ " failed: ") $
 #ifdef WatchFailures
   scopeR label $
 #endif
@@ -592,7 +597,7 @@ lintExprDieR = lintExprR `catchM` error
 -- | Apply a rewrite rule. If it succeeds but the result fails to pass
 -- core-lint, show the before and after (via 'bracketR') and die with the
 -- core-lint error message.
-lintingExprR :: ( ReadBindings c, ReadCrumb c
+lintingExprR :: ( ReadBindings c, ReadCrumb c, LemmaContext c
                 , BoundVars c, AddBindings c, ExtendCrumb c, HasEmptyContext c  -- for unshadowR
                 ) =>
                 String -> Unop (Rewrite c HermitM CoreExpr)
@@ -764,26 +769,42 @@ memoChat brag pre lab =
    chat = traceR
           -- observeR
 
+-- Needs work
+#if 0
+
 -- | Save a definition for future use.
-saveDefT :: (ReadBindings c, ReadCrumb c) =>
+saveDefT :: (ReadBindings c, AddBindings c, ReadCrumb c, ExtendCrumb c) =>
             Observing -> String -> TransformM c CoreDef ()
+
 saveDefT brag lab =
   do def@(Def _ e) <- id
-     constT (saveDef (RememberedName lab) def) >>> (memoChat brag "save" lab $* e >> return ())
+     rememberR (fromString lab) $* DefCore def
+     memoChat brag "save" lab $* e
+     return ()
+
+-- saveDefT brag lab =
+--   do def@(Def _ e) <- id
+--      constT (rememberR (fromString lab) def) >>> (memoChat brag "save" lab $* e >> return ())
 
 findDefT :: (ReadBindings c, ReadCrumb c) =>
             Observing -> String -> TransformM c a CoreExpr
 findDefT brag lab =
-  constT (defExpr <$> lookupDef (RememberedName lab)) >>> memoChat brag "hit" lab
- where
-   defExpr (Def _ expr) = expr
+  unfoldRememberedR NotUsed (fromString lab)
+  >>> memoChat brag "hit" lab
 
-saveDefNoFloatT :: (ReadBindings c, ReadCrumb c) =>
+-- findDefT brag lab =
+--   constT (defExpr <$> unfoldRememberedR NotUsed (fromString lab)) >>> memoChat brag "hit" lab
+--  where
+--    defExpr (Def _ expr) = expr
+
+saveDefNoFloatT :: (ReadBindings c, AddBindings c, ReadCrumb c, ExtendCrumb c) =>
                    Observing -> String -> TransformM c CoreExpr ()
 saveDefNoFloatT brag lab =
   do e <- id
      v <- newIdT bogusDefName $* exprType' e
      saveDefT brag lab $* Def v e
+
+#endif
 
 -- | unJust as transform. Fails on Nothing.
 -- Already in Kure?
@@ -813,13 +834,14 @@ lamFloatCastR = -- labelR "lamFloatCastR" $
      let e' = subst [(v, Cast (Var v') (SymCo domCo))] e
      return (Lam v' (Cast e' ranCo))
 
--- | (\ x :: a -> u `cast` co)  ==>  (\ x -> u) `cast` (<a> -> co)
--- Warning, to avoid looping, don't combine with 'lamFloatCastR'.
-castFloatLamR :: ReExpr
-castFloatLamR =
-  do Lam x (u `Cast` co) <- id
-     return $
-       Lam x u `mkCast` (mkFunCo repr (mkReflCo repr (varType x)) co)
+-- Now in HERMIT. (Did I just not notice earlier?)
+-- -- | (\ x :: a -> u `cast` co)  ==>  (\ x -> u) `cast` (<a> -> co)
+-- -- Warning, to avoid looping, don't combine with 'lamFloatCastR'.
+-- castFloatLamR :: ReExpr
+-- castFloatLamR =
+--   do Lam x (u `Cast` co) <- id
+--      return $
+--        Lam x u `mkCast` (mkFunCo repr (mkReflCo repr (varType x)) co)
 
 -- TODO: Should I check the role?
 
@@ -839,8 +861,11 @@ unCastCastR = do e `Cast` (co1 `TransCo` co2) <- idR
 -- TODO: Maybe re-associate.
 castTransitiveUnivR :: ReExpr
 castTransitiveUnivR =
-  do Cast e (TransCo (coercionKind -> Pair t _) (UnivCo r _ t')) <- id
-     return $ mkCast e (mkUnivCo r t t')
+  do Cast e (TransCo (coercionKind -> Pair t _) (UnivCo prov r _ t')) <- id
+     return $ mkCast e (mkUnivCo prov r t t')
+
+-- univCoProvHack :: UnivCoProvenance
+-- univCoProvHack = PluginProv "plugin-foo"
 
 -- Like 'castFloatAppR', but handles transitivy coercions.
 castFloatAppR' :: (MonadCatch m, ExtendCrumb c) =>
@@ -848,6 +873,11 @@ castFloatAppR' :: (MonadCatch m, ExtendCrumb c) =>
 castFloatAppR' = castFloatAppR <+
                  -- castFloatAppUnivR <+
                  (appAllR unCastCastR id >>> castFloatAppR')
+
+-- For now
+mkUnivCo' :: Role -> Type -> Type -> Coercion
+-- mkUnivCo' = mkUnsafeCo
+mkUnivCo' = mkUnivCo (fsLit "plugin-foo-provenance")
 
 -- | Like castFloatApp but handles *all* coercions, and makes universal coercions.
 --   (f `cast` (co :: (a -> b) ~ (a' -> b'))) e  ==>
@@ -865,8 +895,8 @@ castFloatAppUnivR =
          -- guardMsg (a =~= a')
          --   "castFloatAppUnivR: cast changes domain types"
          return $
-           mkCast (App fun (mkCast arg (mkUnivCo role a' a)))
-                  (mkUnivCo role b b'))
+           mkCast (App fun (mkCast arg (mkUnivCo' role a' a)))
+                  (mkUnivCo' role b b'))
       <+
       (do Just (a ,b ) <- return $ splitForAllTy_maybe ty
           Just (a',b') <- return $ splitForAllTy_maybe ty'
@@ -875,20 +905,26 @@ castFloatAppUnivR =
             "castFloatAppUnivR: cast changes type argument"
           return $
             let sub = substTyWith [a] [tyArg] in
-              mkCast (App fun arg) (mkUnivCo role (sub b) (sub b')))
+              mkCast (App fun arg) (mkUnivCo' role (sub b) (sub b')))
 
 -- | case e of p -> (rhs `cast` co)  ==> (case e of p -> rhs) `cast` co
 -- Inverse to 'caseFloatCastR', so don't use both rules!
-castFloatCaseR :: ReExpr
+-- castFloatCaseR :: ReExpr
+castFloatCaseR :: MonadCatch m => Rewrite c m CoreExpr
 castFloatCaseR =
   do Case scrut wild _ [(con,binds,rhs `Cast` co)] <- id
      return $
        Case scrut wild (pFst (coercionKind co)) [(con,binds,rhs)]
          `Cast` co
 
+-- | Like 'castFloatAppR' but cascades through applications.
+castFloatApps :: (MonadCatch m, ExtendCrumb c) => Rewrite c m CoreExpr
+castFloatApps = castFloatAppR . (appAllR castFloatApps id <+ id)
+
 -- | Like caseFloatR, but excludes caseFloatCastR, so we can use castFloatCaseR
 --   Note: does NOT include caseFloatArg
-caseFloatR' :: (ExtendCrumb c, ReadCrumb c, AddBindings c, ReadBindings c) => Rewrite c HermitM CoreExpr
+caseFloatR' :: (ExtendCrumb c, ReadCrumb c, AddBindings c, ReadBindings c) =>
+               Rewrite c HermitM CoreExpr
 caseFloatR' = setFailMsg "Unsuitable expression for Case floating." $
   caseFloatAppR <+ caseFloatCaseR <+ caseFloatLetR
 
@@ -901,7 +937,6 @@ caseWildR = -- labeledR "reifyCaseWild" $
   do Case scrut wild _bodyTy [(DEFAULT,[],body)] <- idR
      return $ Let (NonRec wild scrut) body
 
-
 -- | Like bashExtendedWithR, but for expressions
 bashExtendedWithE :: [ReExpr] -> ReExpr
 bashExtendedWithE rs = extractR (bashExtendedWithR (promoteR <$> rs))
@@ -913,6 +948,45 @@ bashUsingE rs = extractR (bashUsingR (promoteR <$> rs))
 -- | bashE for expressions
 bashE :: ReExpr
 bashE = extractR bashR
+
+#if 0
+type BashOkay c m = 
+  ( AddBindings c, ExtendCrumb c, HasEmptyContext c, LemmaContext c
+  , ReadBindings c, ReadCrumb c, MonadCatch m, MonadUnique m )
+
+bashR' :: BashOkay c m => Rewrite c m LCore
+bashR' = bashExtendedWithR' []
+
+-- | Like bashExtendedWithE, but replaces case-float-cast with cast-float-case.
+-- Having both causes looping.
+bashExtendedWithE' :: [ReExpr] -> ReExpr
+bashExtendedWithE' rs = extractR (bashExtendedWithR' (promoteR <$> rs))
+
+-- | An extensible bash. Given rewrites are performed before normal bash rewrites.
+bashExtendedWithR' :: BashOkay c m
+                   => [Rewrite c m LCore] -> Rewrite c m LCore
+bashExtendedWithR' rs = bashUsingR (rs ++ map fst bashComponents')
+
+bashComponents' :: BashOkay c m => [(Rewrite c m LCore, String)]
+bashComponents' = caseFloats                 -- O(1)
+               ++ filter ((/= "case-float-cast") . snd) bashComponents
+ where
+   caseFloats =
+     [ (promoteExprR castFloatCaseR, "cast-float-case")
+     , (promoteExprR castFloatAppR , "cast-float-app")
+     , (promoteExprR castFloatLamR , "cast-float-lam")
+     ]
+
+-- | bashE for expressions
+bashE' :: ReExpr
+bashE' = extractR bashR'
+
+#endif
+
+-- | Various single-step cast-floating rewrite
+castFloat :: ReExpr
+castFloat = castFloatAppR <+ castFloatLamR <+ castFloatCaseR
+-- TODO: Define castFloatCaseR via caseFloats
 
 type FilterH a = TransformH a ()
 type FilterE   = FilterH CoreExpr
@@ -999,23 +1073,23 @@ bogusDefName = "$bogus-def-name$"
 dropBogus :: Unop (Map Id CoreExpr)
 dropBogus = Map.filterWithKey (\ v _ -> uqVarName v /= bogusDefName)
 
--- | Dump the stash of definitions.
-dumpStashR :: RewriteH CoreProg
-dumpStashR = do stashed <- stashIdMapT
-                already <- arr progBound
-                let new = dropBogus (Map.difference stashed already)
-                -- Drop these let bindings from program before extending.
-                progRhsAnyR (anybuE (dropLets new))  -- or anytdR (repeat (dropLets new))
-                  >>> arr (\ prog -> foldr add prog (Map.toList new))
- where
-   add (v,rhs) = ProgCons (NonRec v rhs)
+-- -- | Dump the stash of definitions.
+-- dumpStashR :: RewriteH CoreProg
+-- dumpStashR = do stashed <- stashIdMapT
+--                 already <- arr progBound
+--                 let new = dropBogus (Map.difference stashed already)
+--                 -- Drop these let bindings from program before extending.
+--                 progRhsAnyR (anybuE (dropLets new))  -- or anytdR (repeat (dropLets new))
+--                   >>> arr (\ prog -> foldr add prog (Map.toList new))
+--  where
+--    add (v,rhs) = ProgCons (NonRec v rhs)
 
 -- We only remove let bindings from the top-level of a definition.
 -- They get floated there.
 -- TODO: Drop unused stashed bindings.
 
-dropStashedLetR :: ReExpr
-dropStashedLetR = stashIdMapT >>= dropLets
+-- dropStashedLetR :: ReExpr
+-- dropStashedLetR = stashIdMapT >>= dropLets
 
 -- Rewrite the right-hand sides of top-level definitions
 progRhsAnyR :: ReExpr -> RewriteH CoreProg
@@ -1040,9 +1114,9 @@ progBound = foldMap bindNames . progToBinds
    bindNames (NonRec v e) = Map.singleton v e
    bindNames (Rec bs)     = Map.fromList bs
 
-stashIdMapT :: TransformM c a (Map Id CoreExpr)
-stashIdMapT =
-  (Map.fromList . Map.elems . fmap defToIdExpr) <$> constT getStash
+-- stashIdMapT :: TransformM c a (Map Id CoreExpr)
+-- stashIdMapT =
+--   (Map.fromList . Map.elems . fmap defToIdExpr) <$> constT getStash
 
 #if 1
 
@@ -1085,20 +1159,22 @@ listT rs =
      guardMsg (length rs == length es) "listT: length mismatch"
      sequence (zipWith ($*) rs es)
 
-unPairR :: ( Functor m, MonadCatch m, MonadThings m, MonadIO m
-           , HasHermitMEnv m, HasHscEnv m, BoundVars c ) =>
-           Transform c m CoreExpr (CoreExpr,CoreExpr)
+unPairR :: OkCM c m => Transform c m CoreExpr (CoreExpr,CoreExpr)
 unPairR = do [_,_,a,b] <- snd <$> callNameT "GHC.Tuple.(,)"
              return (a,b)
 
-externC :: Injection a Core =>
+externC' :: Injection a LCore =>
+            ExternalName -> RewriteH a -> External
+externC' name rew = externC name rew "not yet documented"
+
+externC :: Injection a LCore =>
            ExternalName -> RewriteH a -> String -> External
 externC name rew help =
-  external name (promoteR rew :: ReCore) [help]
+  external name (promoteR rew :: ReLCore) [help]
 
 -- | Normalize a type, giving coercion and result type.
 -- Fails if already normalized (rather than returning 'ReflCo').
-normaliseTypeT :: (MonadIO m, HasHscEnv m, HasHermitMEnv m) =>
+normaliseTypeT :: (MonadIO m, HasHermitMEnv m, LiftCoreM m) =>
                   Role -> Transform c m Type (Coercion, Type)
 normaliseTypeT r = do
   envs <- constT $
@@ -1112,7 +1188,7 @@ normaliseTypeT r = do
 -- Adapted from Andrew Farmer's code.
 
 -- | Alias for 'normalizeTypeT'.
-normalizeTypeT :: (MonadIO m, HasHscEnv m, HasHermitMEnv m) =>
+normalizeTypeT :: (MonadIO m, HasHermitMEnv m, LiftCoreM m) =>
                   Role -> Transform c m Type (Coercion, Type)
 normalizeTypeT = normaliseTypeT
 
@@ -1316,7 +1392,7 @@ retypeExpr :: ReTv CoreExpr
 retypeExpr (Var x)        = \ sub -> let ty  = varType x
                                          ty' = substTy sub ty
                                      in
-                                       mkCast (Var x) (mkUnivCo Representational ty ty')
+                                       mkCast (Var x) (mkUnivCo' Representational ty ty')
 retypeExpr e@(Lit _)      = pure e
 retypeExpr (App u v)      = App <$> retypeExpr u <*> retypeExpr v
 -- retypeExpr (Lam x e)      = Lam <$> retypeVar x <*> (retypeExpr e . pruneBound x)
@@ -1371,7 +1447,7 @@ retypeAlt (con,vs,e) sub =
 retypeCoercion :: ReTv Coercion
 retypeCoercion co =
     -- optCoercion emptyCvSubst <$>
-    (mkUnivCo (coercionRole co) <$> retypeType ty <*> retypeType ty')
+    (mkUnivCo' (coercionRole co) <$> retypeType ty <*> retypeType ty')
  where
    Pair ty ty' = coercionKind co
 
