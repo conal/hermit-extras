@@ -1,6 +1,6 @@
 {-# LANGUAGE CPP, Rank2Types, ConstraintKinds, PatternGuards, ViewPatterns #-}
 {-# LANGUAGE FlexibleContexts, FlexibleInstances, MultiParamTypeClasses #-}
-{-# LANGUAGE ScopedTypeVariables, TupleSections #-}
+{-# LANGUAGE ScopedTypeVariables, TupleSections, LambdaCase #-}
 {-# LANGUAGE DeriveDataTypeable, DeriveFunctor, DeriveFoldable, TypeFamilies #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE UndecidableInstances #-} -- see below
@@ -45,7 +45,7 @@ module HERMIT.Extras
   , moduledName
   , newIdT
   , liftedKind, unliftedKind
-  , ReType, ReExpr, ReBind, ReAlt, ReProg, ReCore
+  , ReType, ReExpr, ReBind, ReAlt, ReProg, ReCore, ReLCore
   , FilterH, FilterE, FilterTy, OkCM, TransformU
   , findTyConT, tyConApp1T
   , isTypeE, isCastE, isDictE, isCoercionE
@@ -88,17 +88,19 @@ module HERMIT.Extras
   , Tree(..), toTree, foldMapT, foldT
   , SyntaxEq(..)
   , regularizeType
+  , cseGuts, cseProg, cseBind, cseExpr
+  , letNonRecSubstSafeR', simplifyR'
   ) where
 
 import Prelude hiding (id,(.),foldr)
 
-import Data.Monoid (Monoid(..),(<>))
+import Data.Monoid (Monoid(..),(<>),Sum(..))
 import Control.Category (Category(..),(>>>))
 import Data.Functor ((<$>),(<$))
 import Data.Foldable (Foldable(..))
 import Control.Applicative (Applicative(..),liftA2,(<|>))
-import Control.Monad ((<=<),unless)
-import Control.Arrow (Arrow(..))
+import Control.Monad ((<=<),unless,when)
+import Control.Arrow (Arrow(..),(>>^))
 import Data.Maybe (catMaybes,fromMaybe)
 import Data.List (intercalate,isPrefixOf)
 import Text.Printf (printf)
@@ -122,6 +124,7 @@ import Type (substTy,substTyWith)
 import TcType (isUnitTy,isBoolTy,isIntTy)
 import Unify (tcUnifyTy)
 -- import TyCoRep ()
+import CSE (cseProgram)
 
 -- import Language.KURE.Transform (apply)
 import HERMIT.Core
@@ -149,6 +152,10 @@ import HERMIT.Dictionary
   , traceR
   -- Remembered
   , rememberR, unfoldRememberedR
+  -- For simplify' and letNonRecSubstSafeR'
+  , letNonRecSubstR, arityOf,varBindingDepthT,exprIsOccurrenceOfT
+  , recToNonrecR, unfoldBasicCombinatorR, betaReducePlusR
+  , caseReduceR, letElimR
   )
 -- import HERMIT.Dictionary (traceR)
 import HERMIT.GHC hiding (FastString(..),(<>),substTy)
@@ -214,6 +221,8 @@ exprTypeT =
   do e <- idR
      guardMsg (not (isType e)) "exprTypeT: given a Type"
      return (exprType' e)
+
+-- TODO: redefine exprTypeT via HERMIT's more exprTypeM
 
 isType :: CoreExpr -> Bool
 isType (Type {}) = True
@@ -459,6 +468,7 @@ type ReExpr  = RewriteH CoreExpr
 type ReAlt   = RewriteH CoreAlt
 type ReCore  = RewriteH Core
 type ReLCore = RewriteH LCore
+type ReGuts  = RewriteH ModGuts
 
 #if 0
 
@@ -1540,3 +1550,87 @@ regularizeType (TyConApp tc tys)     = TyConApp tc (regularizeType <$> tys)
 regularizeType (FunTy u v)           = FunTy (regularizeType u) (regularizeType v)
 regularizeType (ForAllTy x ty)       = ForAllTy x (regularizeType ty)
 regularizeType ty@(LitTy _)          = ty
+
+cseGuts :: ReGuts
+cseGuts = arr (\ guts -> guts { mg_binds = cseProgram (mg_binds guts) })
+
+cseProg :: ReProg
+cseProg = arr (bindsToProg . cseProgram . progToBinds)
+
+cseBind :: ReBind
+cseBind = arr (head . cseProgram . (:[]))
+
+cseExpr :: ReExpr
+cseExpr = do v <- newIdT "cse_dummy" . exprTypeT
+             arr (\ (NonRec _ e) -> e) . cseBind . arr (NonRec v)
+
+-- Oops. My CSE transformations always succeed, even when no CSE happens.
+-- TODO: Fix.
+
+betaReduceSafePlusR :: MonadCatch m => Rewrite c m CoreExpr
+betaReduceSafePlusR = prefixFailMsg "Multi-beta-reduction failed: " $ do
+    (f,args) <- callT
+    let (e',atLeastOne) = reduceAll f args
+        reduceAll (Lam v body) (a:as) =
+          (Let (NonRec v a) (fst $ reduceAll body as), True)
+        reduceAll e            as     = (mkCoreApps e as, False)
+    guardMsg atLeastOne "no beta reductions possible."
+    return e'
+
+{--------------------------------------------------------------------
+    Copied and altered from HERMIT
+--------------------------------------------------------------------}
+
+-- From `HERMIT.Dictionary.Local.Let`:
+
+-- Change criterion (B):
+-- 
+-- (B) The let-bound value is either:
+--       (i)   a variable;
+--       (ii)  polymorphic;
+--       (iii) dictionary-ish
+
+-- | Variant of 'letNonRecSubstSafeR' accepting a test for whether an expression
+-- is simple enough to replicate.
+letNonRecSubstSafeR' :: forall c m. 
+   ( AddBindings c, ExtendPath c Crumb, ReadPath c Crumb, ReadBindings c
+   , HasEmptyContext c, MonadCatch m)
+  => Transform c m CoreExpr Bool -> Rewrite c m CoreExpr
+letNonRecSubstSafeR' safeBindT =
+    do Let (NonRec v _) _ <- idR
+       when (isId v) $ guardMsgM (safeSubstT v) "safety criteria not met."
+       letNonRecSubstR
+  where
+    safeSubstT :: Id -> Transform c m CoreExpr Bool
+    safeSubstT i = letNonRecT mempty safeBindT (safeOccursT i) (\ () -> (||))
+
+    safeOccursT :: Id -> Transform c m CoreExpr Bool
+    safeOccursT i =
+      do depth <- varBindingDepthT i
+         let occursHereT :: Transform c m Core ()
+             occursHereT = promoteExprT (exprIsOccurrenceOfT i depth >>> guardT)
+
+             -- lamOccurrenceT can only fail if the expression is not a Lam
+             -- return either 2 (occurrence) or 0 (no occurrence)
+             lamOccurrenceT :: Transform c m CoreExpr (Sum Int)
+             lamOccurrenceT =  lamT mempty
+                                    (mtryM (Sum 2 <$ extractT (onetdT occursHereT)))
+                                    mappend
+
+             occurrencesT :: Transform c m Core (Sum Int)
+             occurrencesT = prunetdT (promoteExprT lamOccurrenceT <+ (Sum 1 <$ occursHereT))
+
+         extractT occurrencesT >>^ (getSum >>> (< 2))
+
+
+simplifyR' :: ( AddBindings c, ExtendPath c Crumb, HasEmptyContext c, LemmaContext c, ReadBindings c, ReadPath c Crumb
+             , MonadCatch m, MonadUnique m )
+          => Transform c m CoreExpr Bool -> Rewrite c m LCore
+simplifyR' safeBindT = setFailMsg "Simplify failed: nothing to simplify." $
+    innermostR (   promoteBindR recToNonrecR
+                <+ promoteExprR ( unfoldBasicCombinatorR
+                               <+ betaReducePlusR
+                               <+ letNonRecSubstSafeR' safeBindT
+                               <+ caseReduceR False
+                               <+ letElimR )
+               )
