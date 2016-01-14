@@ -56,7 +56,7 @@ module HERMIT.Extras
   , lintingExprR
   , varLitE, uqVarName, fqVarName, typeEtaLong, simplifyE
   , walkE , alltdE, anytdE, anybuE, onetdE, onebuE
-  , inAppTys, isAppTy, inlineWorkerR
+  , inAppTys, isAppTy, inlineWorkerR, unfoldWorkerR
   , letFloatToProg
   , concatProgs
   , rejectR , rejectTypeR
@@ -89,6 +89,7 @@ module HERMIT.Extras
   , SyntaxEq(..)
   , regularizeType
   , cseGuts, cseProg, cseBind, cseExpr
+  , betaReduceSafePlusR
   , letNonRecSubstSafeR', simplifyR'
   ) where
 
@@ -128,13 +129,14 @@ import CSE (cseProgram)
 
 -- import Language.KURE.Transform (apply)
 import HERMIT.Core
-  ( CoreProg(..),Crumb,bindsToProg,progToBinds,freeVarsExpr
+  ( CoreProg(..),Crumb,bindsToProg,progToBinds
+  , freeVarsExpr, freeVarsCoercion
   , progSyntaxEq,bindSyntaxEq,defSyntaxEq,exprSyntaxEq
   , altSyntaxEq,typeSyntaxEq,coercionSyntaxEq
   , CoreDef(..),defToIdExpr, coercionAlphaEq,localFreeVarsExpr)
 import HERMIT.Name (newIdH,mkQualified)
 import HERMIT.Monad
-  (HermitM,HasHermitMEnv,getModGuts,LiftCoreM,getHscEnv)
+  (HermitM,HasHermitMEnv,HasLemmas,getModGuts,LiftCoreM,getHscEnv)
 import HERMIT.Context
   ( BoundVars(..),AddBindings(..),ReadBindings(..)
   , HasEmptyContext(..), HasCoreRules(..)
@@ -142,7 +144,7 @@ import HERMIT.Context
 -- Note that HERMIT.Dictionary re-exports HERMIT.Dictionary.*
 import HERMIT.Dictionary
   ( findIdT, findTyConT, callT, callNameT, simplifyR, letFloatTopR, letSubstR, betaReduceR
-  , observeR, bracketR, bashExtendedWithR, bashUsingR, bashR, bashComponents
+  , observeR, bracketR, bashExtendedWithR, bashUsingR, bashR
   , wrongExprForm
   , castFloatAppR, castFloatLamR
   , caseFloatCastR, caseFloatCaseR, caseFloatAppR, caseFloatLetR
@@ -609,8 +611,9 @@ lintExprDieR = lintExprR `catchM` error
 -- core-lint error message.
 lintingExprR :: ( ReadBindings c, ReadCrumb c, LemmaContext c
                 , BoundVars c, AddBindings c, ExtendCrumb c, HasEmptyContext c  -- for unshadowR
-                ) =>
-                String -> Unop (Rewrite c HermitM CoreExpr)
+                , MonadCatch m, MonadUnique m, LiftCoreM m, HasDynFlags m, HasHermitMEnv m
+                , HasLemmas m) =>
+                String -> Unop (Rewrite c m CoreExpr)
 lintingExprR msg rr =
   do e  <- idR
      e' <- rr'
@@ -700,6 +703,11 @@ isWorker = ("$W" `isPrefixOf`) . uqVarName
 
 inlineWorkerR :: ReExpr
 inlineWorkerR = isWorkerT >> inlineR
+
+unfoldWorkerR :: ReExpr
+unfoldWorkerR = unfoldPredR (const . isWorker)
+
+-- unfoldWorkerR = unfoldPredR (\ v _ -> isWorker v)
 
 -- Apply a rewriter inside type lambdas.
 inAppTys :: Unop ReExpr
@@ -917,12 +925,14 @@ castFloatAppUnivR =
             let sub = substTyWith [a] [tyArg] in
               mkCast (App fun arg) (mkUnivCo' role (sub b) (sub b')))
 
--- | case e of p -> (rhs `cast` co)  ==> (case e of p -> rhs) `cast` co
+-- | @case e of p -> (rhs `cast` co)  ==> (case e of p -> rhs) `cast` co@,
+-- where no variable bound by @p@ occurs freely in @co@.
 -- Inverse to 'caseFloatCastR', so don't use both rules!
--- castFloatCaseR :: ReExpr
 castFloatCaseR :: MonadCatch m => Rewrite c m CoreExpr
 castFloatCaseR =
   do Case scrut wild _ [(con,binds,rhs `Cast` co)] <- id
+     guardMsg (all (`notElemVarSet` freeVarsCoercion co) binds)
+        "case-alt-bound variable appears in the coercion."
      return $
        Case scrut wild (pFst (coercionKind co)) [(con,binds,rhs)]
          `Cast` co
@@ -958,40 +968,6 @@ bashUsingE rs = extractR (bashUsingR (promoteR <$> rs))
 -- | bashE for expressions
 bashE :: ReExpr
 bashE = extractR bashR
-
-#if 0
-type BashOkay c m = 
-  ( AddBindings c, ExtendCrumb c, HasEmptyContext c, LemmaContext c
-  , ReadBindings c, ReadCrumb c, MonadCatch m, MonadUnique m )
-
-bashR' :: BashOkay c m => Rewrite c m LCore
-bashR' = bashExtendedWithR' []
-
--- | Like bashExtendedWithE, but replaces case-float-cast with cast-float-case.
--- Having both causes looping.
-bashExtendedWithE' :: [ReExpr] -> ReExpr
-bashExtendedWithE' rs = extractR (bashExtendedWithR' (promoteR <$> rs))
-
--- | An extensible bash. Given rewrites are performed before normal bash rewrites.
-bashExtendedWithR' :: BashOkay c m
-                   => [Rewrite c m LCore] -> Rewrite c m LCore
-bashExtendedWithR' rs = bashUsingR (rs ++ map fst bashComponents')
-
-bashComponents' :: BashOkay c m => [(Rewrite c m LCore, String)]
-bashComponents' = caseFloats                 -- O(1)
-               ++ filter ((/= "case-float-cast") . snd) bashComponents
- where
-   caseFloats =
-     [ (promoteExprR castFloatCaseR, "cast-float-case")
-     , (promoteExprR castFloatAppR , "cast-float-app")
-     , (promoteExprR castFloatLamR , "cast-float-lam")
-     ]
-
--- | bashE for expressions
-bashE' :: ReExpr
-bashE' = extractR bashR'
-
-#endif
 
 -- | Various single-step cast-floating rewrite
 castFloat :: ReExpr
@@ -1594,12 +1570,18 @@ betaReduceSafePlusR = prefixFailMsg "Multi-beta-reduction failed: " $ do
 -- is simple enough to replicate.
 letNonRecSubstSafeR' :: forall c m. 
    ( AddBindings c, ExtendPath c Crumb, ReadPath c Crumb, ReadBindings c
-   , HasEmptyContext c, MonadCatch m)
+   , HasEmptyContext c, MonadCatch m
+   -- For lintingExprR, to be removed later:
+   -- , LemmaContext c
+   -- , MonadUnique m, HasDynFlags m, HasHermitMEnv m, LiftCoreM m, HasLemmas m
+   )
   => Transform c m CoreExpr Bool -> Rewrite c m CoreExpr
 letNonRecSubstSafeR' safeBindT =
     do Let (NonRec v _) _ <- idR
        when (isId v) $ guardMsgM (safeSubstT v) "safety criteria not met."
-       letNonRecSubstR
+       id
+         -- . lintingExprR "pre-letNonRecSubstSafeR'" id
+         . letNonRecSubstR
   where
     safeSubstT :: Id -> Transform c m CoreExpr Bool
     safeSubstT i = letNonRecT mempty safeBindT (safeOccursT i) (\ () -> (||))
@@ -1623,8 +1605,13 @@ letNonRecSubstSafeR' safeBindT =
          extractT occurrencesT >>^ (getSum >>> (< 2))
 
 
-simplifyR' :: ( AddBindings c, ExtendPath c Crumb, HasEmptyContext c, LemmaContext c, ReadBindings c, ReadPath c Crumb
-             , MonadCatch m, MonadUnique m )
+simplifyR' ::
+  ( AddBindings c, ExtendPath c Crumb, HasEmptyContext c, LemmaContext c
+  , ReadBindings c, ReadPath c Crumb
+  , MonadCatch m, MonadUnique m
+  -- For linting letNonRecSubstR', to be removed later:
+  -- , HasDynFlags m, HasHermitMEnv m, LiftCoreM m, HasLemmas m
+  )
           => Transform c m CoreExpr Bool -> Rewrite c m LCore
 simplifyR' safeBindT = setFailMsg "Simplify failed: nothing to simplify." $
     innermostR (   promoteBindR recToNonrecR
