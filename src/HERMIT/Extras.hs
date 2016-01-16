@@ -52,6 +52,7 @@ module HERMIT.Extras
   , mkUnit, mkPair, mkLeft, mkRight, mkEither
   , InCoreTC
   , Observing, observeR', tries, triesL, scopeR, labeled
+               , labeled'  -- To replace labeled
   , lintExprR -- , lintExprDieR
   , lintingExprR
   , varLitE, uqVarName, fqVarName, typeEtaLong, simplifyE
@@ -1543,15 +1544,29 @@ cseExpr = do v <- newIdT "cse_dummy" . exprTypeT
 -- Oops. My CSE transformations always succeed, even when no CSE happens.
 -- TODO: Fix.
 
-betaReduceSafePlusR :: MonadCatch m => Rewrite c m CoreExpr
-betaReduceSafePlusR = prefixFailMsg "Multi-beta-reduction failed: " $ do
-    (f,args) <- callT
-    let (e',atLeastOne) = reduceAll f args
-        reduceAll (Lam v body) (a:as) =
-          (Let (NonRec v a) (fst $ reduceAll body as), True)
-        reduceAll e            as     = (mkCoreApps e as, False)
-    guardMsg atLeastOne "no beta reductions possible."
-    return e'
+-- -- | Like 'betaReducePlusR' but just makes 'Let' expressions rather than
+-- -- substituting. You can then use 'letNonRecSubstR''.
+-- betaReduceSafePlusR :: MonadCatch m => Rewrite c m CoreExpr
+-- betaReduceSafePlusR = prefixFailMsg "Multi-beta-reduction failed: " $ do
+--     (f,args) <- callT
+--     let (e',atLeastOne) = reduceAll f args
+--         reduceAll (Lam v body) (a:as) =
+--           (Let (NonRec v a) (fst $ reduceAll body as), True)
+--         reduceAll e            as     = (mkCoreApps e as, False)
+--     guardMsg atLeastOne "no beta reductions possible."
+--     return e'
+
+-- | Like 'betaReducePlusR' but makes 'Let' expressions when substitution would
+-- duplicate work. It takes a safety condition as with 'letNonRecSubstR''.
+betaReduceSafePlusR :: ( MonadCatch m, AddBindings c, ExtendCrumb c, ReadCrumb c
+                      , ReadBindings c, HasEmptyContext c )
+     => Transform c m CoreExpr Bool -> Rewrite c m CoreExpr
+betaReduceSafePlusR safeBindT = go
+ where
+   go = betaReduceR' <+ (tryR betaReduceR' . appAllR go id)
+   betaReduceR' = tryR (letNonRecSubstSafeR' safeBindT) .  betaReduceR
+
+-- The tryR in go covers having more arguments than lambdas.
 
 {--------------------------------------------------------------------
     Copied and altered from HERMIT
@@ -1579,9 +1594,7 @@ letNonRecSubstSafeR' :: forall c m.
 letNonRecSubstSafeR' safeBindT =
     do Let (NonRec v _) _ <- idR
        when (isId v) $ guardMsgM (safeSubstT v) "safety criteria not met."
-       id
-         -- . lintingExprR "pre-letNonRecSubstSafeR'" id
-         . letNonRecSubstR
+       letNonRecSubstR
   where
     safeSubstT :: Id -> Transform c m CoreExpr Bool
     safeSubstT i = letNonRecT mempty safeBindT (safeOccursT i) (\ () -> (||))
@@ -1621,3 +1634,31 @@ simplifyR' safeBindT = setFailMsg "Simplify failed: nothing to simplify." $
                                <+ caseReduceR False
                                <+ letElimR )
                )
+
+-- Experiment: must bracketR and hence labeled be a Rewrite, or can it be a
+-- general Transform?
+
+-- | Show before and after a rewrite.
+bracketR' :: ( Injection a LCoreTC, LemmaContext c, ReadBindings c, ReadPath c Crumb
+            , HasHermitMEnv m, HasLemmas m, LiftCoreM m, MonadCatch m
+            -- added
+            , Injection b LCoreTC)
+         => String -> Transform c m a b -> Transform c m a b
+bracketR' msg rr = do
+    -- Be careful to only run the rr once, in case it has side effects.
+    (e,r) <- idR &&& attemptM rr
+    either fail (\ e' -> do _ <- return e >>> observeR before
+                            return e' >>> observeR after) r
+    where before = msg ++ " (before)"
+          after  = msg ++ " (after)"
+
+labeled' :: ( ReadBindings c, ReadCrumb c, LemmaContext c, InCoreTC a
+            , HasHermitMEnv m, HasLemmas m, LiftCoreM m, MonadCatch m
+            , Injection b LCoreTC) =>
+           Observing -> (String, Transform c m a b) -> Transform c m a b
+labeled' observing (label,r) =
+  prefixFailMsg (label ++ " failed: ") $
+#ifdef WatchFailures
+  scopeR label $
+#endif
+  (if observing then bracketR' label else id) r
