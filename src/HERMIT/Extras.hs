@@ -929,6 +929,8 @@ castFloatAppUnivR =
 -- | @case e of p -> (rhs `cast` co)  ==> (case e of p -> rhs) `cast` co@,
 -- where no variable bound by @p@ occurs freely in @co@.
 -- Inverse to 'caseFloatCastR', so don't use both rules!
+-- TODO: Generalize to multi-alternative case in which every alternative has a
+-- cast with the same coercion.
 castFloatCaseR :: MonadCatch m => Rewrite c m CoreExpr
 castFloatCaseR =
   do Case scrut wild _ [(con,binds,rhs `Cast` co)] <- id
