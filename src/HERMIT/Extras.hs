@@ -89,7 +89,7 @@ module HERMIT.Extras
   , Tree(..), toTree, foldMapT, foldT
   , SyntaxEq(..)
   , regularizeType
-  , cseGuts, cseProg, cseBind, cseExpr
+  , cseGutsR, cseProgR, cseBindR, cseExprR
   , betaReduceSafePlusR
   , letNonRecSubstSafeR', simplifyR'
   ) where
@@ -1530,18 +1530,18 @@ regularizeType (FunTy u v)           = FunTy (regularizeType u) (regularizeType 
 regularizeType (ForAllTy x ty)       = ForAllTy x (regularizeType ty)
 regularizeType ty@(LitTy _)          = ty
 
-cseGuts :: ReGuts
-cseGuts = arr (\ guts -> guts { mg_binds = cseProgram (mg_binds guts) })
+cseGutsR :: ReGuts
+cseGutsR = arr (\ guts -> guts { mg_binds = cseProgram (mg_binds guts) })
 
-cseProg :: ReProg
-cseProg = arr (bindsToProg . cseProgram . progToBinds)
+cseProgR :: ReProg
+cseProgR = arr (bindsToProg . cseProgram . progToBinds)
 
-cseBind :: ReBind
-cseBind = arr (head . cseProgram . (:[]))
+cseBindR :: ReBind
+cseBindR = arr (head . cseProgram . (:[]))
 
-cseExpr :: ReExpr
-cseExpr = do v <- newIdT "cse_dummy" . exprTypeT
-             arr (\ (NonRec _ e) -> e) . cseBind . arr (NonRec v)
+cseExprR :: ReExpr
+cseExprR = do v <- newIdT "cse_dummy" . exprTypeT
+              arr (\ (NonRec _ e) -> e) . cseBindR . arr (NonRec v)
 
 -- Oops. My CSE transformations always succeed, even when no CSE happens.
 -- TODO: Fix.
