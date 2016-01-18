@@ -45,7 +45,7 @@ module HERMIT.Extras
   , moduledName
   , newIdT
   , liftedKind, unliftedKind
-  , ReType, ReExpr, ReBind, ReAlt, ReProg, ReCore, ReLCore
+  , ReType, ReExpr, ReBind, ReAlt, ReProg, ReCore, ReLCore,ReGuts
   , FilterH, FilterE, FilterTy, OkCM, TransformU
   , findTyConT, tyConApp1T
   , isTypeE, isCastE, isDictE, isCoercionE
@@ -162,7 +162,7 @@ import HERMIT.Dictionary
   )
 -- import HERMIT.Dictionary (traceR)
 import HERMIT.GHC hiding (FastString(..),(<>),substTy)
-import HERMIT.Kure hiding (apply,(<$>),(<*>))
+import HERMIT.Kure hiding (apply)
 import HERMIT.External (External,Extern(..),external,ExternalName)
 import HERMIT.Name (HermitName)
 import HERMIT.Lemma (Used(..))
