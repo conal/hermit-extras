@@ -51,7 +51,7 @@ module HERMIT.Extras
   , isTypeE, isCastE, isDictE, isCoercionE
   , mkUnit, mkPair, mkLeft, mkRight, mkEither
   , InCoreTC
-  , Observing, observeR', tries, triesL, scopeR, labeled
+  , Observing, observeR', orL, scopeR, labeled
                , labeled'  -- To replace labeled
   , lintExprR -- , lintExprDieR
   , lintingExprR
@@ -515,7 +515,7 @@ callSplitT = do (f,args) <- callT
                 return (f,tyArgs,valArgs)
 
 callNameSplitT :: OkCM c m =>
-  HermitName -> Transform c m CoreExpr (CoreExpr, [Type], [Expr CoreBndr])
+  HermitName -> Transform c m CoreExpr (CoreExpr, [Type], [CoreExpr])
 callNameSplitT name = do (f,args) <- callNameT name
                          let (tyArgs,valArgs) = splitTysVals args
                          return (f,tyArgs,valArgs)
@@ -568,13 +568,11 @@ observeR' :: (ReadBindings c, ReadCrumb c, LemmaContext c) =>
 observeR' True  = observeR
 observeR' False = const idR
 
-tries :: (MonadCatch m, InCoreTC t) =>
-         [Rewrite c m t] -> Rewrite c m t
-tries = foldr (<+) ({- observeR' "Unhandled" >>> -} fail "unhandled")
+-- TODO: use kure's orR?
 
-triesL :: (ReadBindings c, ReadCrumb c, LemmaContext c, InCoreTC t) =>
-          Observing -> [(String,RewriteM c t)] -> RewriteM c t
-triesL observing = tries . map (labeled observing)
+orL :: (ReadBindings c, ReadCrumb c, LemmaContext c, InCoreTC t) =>
+       Observing -> [(String,RewriteM c t)] -> RewriteM c t
+orL observing = orR . map (labeled observing)
 
 -- scopeR :: InCoreTC a => String -> Unop (RewriteM c a)
 scopeR :: String -> Unop (TransformM c a b)
