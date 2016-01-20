@@ -144,7 +144,8 @@ import HERMIT.Context
   , HermitC, LemmaContext )
 -- Note that HERMIT.Dictionary re-exports HERMIT.Dictionary.*
 import HERMIT.Dictionary
-  ( findIdT, findTyConT, callT, callNameT, simplifyR, letFloatTopR, letSubstR, betaReduceR
+  ( findIdT, findTyConT, callT, callNameT, simplifyR
+  , letFloatTopR, letFloatAppR, letSubstR, betaReduceR
   , observeR, bracketR, bashExtendedWithR, bashUsingR, bashR
   , wrongExprForm
   , castFloatAppR, castFloatLamR
@@ -1558,13 +1559,15 @@ cseExprR = do v <- newIdT "cse_dummy" . exprTypeT
 
 -- | Like 'betaReducePlusR' but makes 'Let' expressions when substitution would
 -- duplicate work. It takes a safety condition as with 'letNonRecSubstR''.
-betaReduceSafePlusR :: ( MonadCatch m, AddBindings c, ExtendCrumb c, ReadCrumb c
-                      , ReadBindings c, HasEmptyContext c )
+betaReduceSafePlusR :: ( MonadCatch m, MonadUnique m
+                       , AddBindings c, ExtendCrumb c, ReadCrumb c
+                       , ReadBindings c, HasEmptyContext c )
      => Transform c m CoreExpr Bool -> Rewrite c m CoreExpr
 betaReduceSafePlusR safeBindT = go
  where
    go = betaReduceR' <+ (tryR betaReduceR' . appAllR go id)
-   betaReduceR' = tryR (letNonRecSubstSafeR' safeBindT) .  betaReduceR
+   betaReduceR' =  (tryR (letNonRecSubstSafeR' safeBindT) .  betaReduceR)
+                <+ (betaReduceR' . letFloatAppR)
 
 -- The tryR in go covers having more arguments than lambdas.
 
