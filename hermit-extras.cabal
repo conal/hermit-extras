@@ -21,7 +21,7 @@ Library
   Build-Depends:    base < 5
                   , ghc >= 7.6
                   , containers
-                  , transformers
+                  , transformers >= 0.4 && < 0.5
                   , kure   >= 2.16.0
                   , hermit >= 1.0.0.1
   Exposed-Modules:
