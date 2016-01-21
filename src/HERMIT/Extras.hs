@@ -1,8 +1,9 @@
-{-# LANGUAGE CPP, Rank2Types, ConstraintKinds, PatternGuards, ViewPatterns #-}
+{-# LANGUAGE CPP, Rank2Types, ConstraintKinds #-}
+{-# LANGUAGE PatternGuards, ViewPatterns, PatternSynonyms #-}
 {-# LANGUAGE FlexibleContexts, FlexibleInstances, MultiParamTypeClasses #-}
 {-# LANGUAGE ScopedTypeVariables, TupleSections, LambdaCase #-}
 {-# LANGUAGE DeriveDataTypeable, DeriveFunctor, DeriveFoldable, TypeFamilies #-}
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE OverloadedStrings, ViewPatterns #-}
 {-# LANGUAGE UndecidableInstances #-} -- see below
 -- {-# LANGUAGE BangPatterns #-}
 {-# OPTIONS_GHC -Wall #-}
@@ -35,7 +36,7 @@ module HERMIT.Extras
   , onCaseAlts, onAltRhs, unliftedType
   , apps, apps', apps1', callSplitT, callNameSplitT, unCall, unCall1
   , collectForalls, subst, isTyLam, setNominalRole_maybe
-  , isVarT, isLitT, isWorker, isWorkerT
+  , isVarT, isLitT, detickE, isWorker, isWorkerT
   , repr
 {-
   , varOccCount, oneOccT, castOccsSame
@@ -67,7 +68,7 @@ module HERMIT.Extras
   , saveDefT, findDefT
   , saveDefNoFloatT, dumpStashR, dropStashedLetR
 -}
-  , unJustT, tcViewT, unFunCo
+  , unJustT, tcViewT, pattern FunCo, unFunCo, unFunCoT
   , lamFloatCastR{-, castFloatLamR-}, castCastR, unCastCastR, castTransitiveUnivR
   , castFloatAppR',castFloatAppUnivR, castFloatCaseR, castFloatApps
   , caseFloatR', caseWildR
@@ -694,6 +695,10 @@ onebuE = walkE onebuR
 -- TODO: Try rewriting more gracefully, testing isForAllTy first and
 -- maybeEtaExpandR
 
+-- | Remove a tick
+detickE :: ReExpr
+detickE = tickT id id (const id)
+
 isWorkerT :: FilterE
 isWorkerT = do Var (isWorker -> True) <- id
                return ()
@@ -834,11 +839,24 @@ unJustT = do Just x <- idR
 tcViewT :: RewriteM c Type
 tcViewT = unJustT . arr tcView
 
+pattern FunCo r dom ran <- TyConAppCo r (isFunTyCon -> True) [dom,ran]
+ where
+   FunCo r dom ran = TyConAppCo r funTyCon [dom,ran]
+
+-- pattern Foo a b <- [a,b]
+
 -- | Dissect a function coercion into role, domain, and range
 unFunCo :: Coercion -> Maybe (Role,Coercion,Coercion)
-unFunCo (TyConAppCo role tc [domCo,ranCo])
-  | isFunTyCon tc = Just (role,domCo,ranCo)
+unFunCo (FunCo r dom ran) = Just (r,dom,ran)
 unFunCo _ = Nothing
+
+-- | Dissect a function coercion into role, domain, and range, failing if not a
+-- function coercion.
+unFunCoT :: MonadCatch m => Transform c m Coercion (Role,Coercion,Coercion)
+unFunCoT = setFailMsg "unFunCoT: not a function coercion" $
+           -- unJustT . arr unFunCo
+           do FunCo r dom ran <- id
+              return (r,dom,ran)
 
 -- | cast (\ v -> e) (domCo -> ranCo)
 --     ==> (\ v' -> cast (e[Var v <- cast (Var v') (SymCo domCo)]) ranCo)
