@@ -53,7 +53,7 @@ module HERMIT.Extras
   , mkUnit, mkPair, mkLeft, mkRight, mkEither
   , InCoreTC
   , Observing, observeR', orL, scopeR, labeled
-               , labeled'  -- To replace labeled
+             , bracketR', labeled'  -- To replace labeled
   , lintExprR -- , lintExprDieR
   , lintingExprR
   , varLitE, uqVarName, fqVarName, typeEtaLong, simplifyE
@@ -80,7 +80,7 @@ module HERMIT.Extras
   , progRhsAnyR
   , ($*), pairT, listT, unPairR
   , externC, externC'
-  , normaliseTypeT, normalizeTypeT, optimizeCoercionR, optimizeCastR
+  , normaliseTypeM, normaliseTypeT, normalizeTypeT, optimizeCoercionR, optimizeCastR
   , bindUnLetIntroR
   -- , letFloatCaseAltR
   , trivialExpr, letSubstTrivialR, betaReduceTrivialR
@@ -229,9 +229,11 @@ exprTypeT =
 
 -- TODO: redefine exprTypeT via HERMIT's more exprTypeM
 
+{-# DEPRECATED isType "Please use 'isTypeArg' instead." #-}
 isType :: CoreExpr -> Bool
-isType (Type {}) = True
-isType _         = False
+isType = isTypeArg
+-- isType (Type {}) = True
+-- isType _         = False
 
 pairTy :: Binop Type
 pairTy a b = mkBoxedTupleTy [a,b]
@@ -435,7 +437,7 @@ exprAsConApp e = exprIsConApp_maybe (in_scope, idUnfolding) e
     HERMIT utilities
 --------------------------------------------------------------------}
 
-newIdT :: String -> TransformM c Type Id
+newIdT :: MonadUnique m => String -> Transform c m Type Id
 newIdT nm = do ty <- id
                constT (newIdH nm ty)
 
@@ -543,6 +545,7 @@ mkPair = return $ \ u v  -> mkCoreTup [u,v]
 moduledName :: String -> String -> HermitName
 -- moduledName modName = fromString . (modName ++) . ('.' :)
 moduledName = mkQualified  -- Now exported from HERMIT.Name
+{-# DEPRECATED moduledName "Please use HERMIT.Name.mkQualified" #-}
 
 eitherName :: String -> HermitName
 eitherName = moduledName "Data.Either"
@@ -1178,6 +1181,7 @@ externC :: Injection a LCore =>
 externC name rew help =
   external name (promoteR rew :: ReLCore) [help]
 
+#if 0
 -- | Normalize a type, giving coercion and result type.
 -- Fails if already normalized (rather than returning 'ReflCo').
 normaliseTypeT :: (MonadIO m, HasHermitMEnv m, LiftCoreM m) =>
@@ -1190,6 +1194,26 @@ normaliseTypeT r = do
   res@(co,_) <- arr (normaliseType envs r)
   guardMsg (not (isReflCo co)) "normaliseTypeT: already normal"
   return res
+#else
+
+-- | Normalize a type, giving coercion and result type.
+-- Fails if already normalized (rather than returning 'ReflCo').
+normaliseTypeT :: (MonadIO m, HasHermitMEnv m, LiftCoreM m) =>
+                  Role -> Transform c m Type (Coercion, Type)
+normaliseTypeT r = contextfreeT (normaliseTypeM r)
+
+-- | Normalize a type, giving coercion and result type.
+-- Fails if already normalized (rather than returning 'ReflCo').
+normaliseTypeM :: (MonadIO m, HasHermitMEnv m, LiftCoreM m) =>
+                  Role -> Type -> m (Coercion, Type)
+normaliseTypeM r ty =
+  do guts <- getModGuts
+     eps <- getHscEnv >>= liftIO . hscEPS 
+     let res@(co,_) = normaliseType (eps_fam_inst_env eps, mg_fam_inst_env guts) r ty
+     guardMsg (not (isReflCo co)) "normaliseTypeT: already normal"
+     return res
+
+#endif
 
 -- Adapted from Andrew Farmer's code.
 
@@ -1661,10 +1685,10 @@ simplifyR' safeBindT = setFailMsg "Simplify failed: nothing to simplify." $
 
 -- | Show before and after a rewrite.
 bracketR' :: ( Injection a LCoreTC, LemmaContext c, ReadBindings c, ReadPath c Crumb
-            , HasHermitMEnv m, HasLemmas m, LiftCoreM m, MonadCatch m
-            -- added
-            , Injection b LCoreTC)
-         => String -> Transform c m a b -> Transform c m a b
+             , HasHermitMEnv m, HasLemmas m, LiftCoreM m, MonadCatch m
+             -- added
+             , Injection b LCoreTC)
+          => String -> Transform c m a b -> Transform c m a b
 bracketR' msg rr = do
     -- Be careful to only run the rr once, in case it has side effects.
     (e,r) <- idR &&& attemptM rr
