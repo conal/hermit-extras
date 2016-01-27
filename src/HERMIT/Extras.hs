@@ -52,6 +52,7 @@ module HERMIT.Extras
   , isTypeE, isCastE, isDictE, isCoercionE
   , mkUnit, mkPair, mkLeft, mkRight, mkEither
   , InCoreTC
+  , onScrutineeR
   , Observing, observeR', orL, scopeR, labeled
              , bracketR', labeled'  -- To replace labeled
   , lintExprR -- , lintExprDieR
@@ -93,6 +94,7 @@ module HERMIT.Extras
   , cseGutsR, cseProgR, cseBindR, cseExprR
   , betaReduceSafePlusR
   , letNonRecSubstSafeR', simplifyR'
+  , ReadCrumb, ExtendCrumb
   ) where
 
 import Prelude hiding (id,(.),foldr)
@@ -220,11 +222,13 @@ exprType' :: CoreExpr -> Type
 exprType' (Type {}) = error "exprType': given a Type"
 exprType' e         = exprType e
 
--- Like 'exprType', but fails if given a type.
+-- Like 'exprType', but crashes if given a type.
 exprTypeT :: Monad m => Transform c m CoreExpr Type
 exprTypeT =
   do e <- idR
-     guardMsg (not (isType e)) "exprTypeT: given a Type"
+     -- guardMsg (not (isType e)) "exprTypeT: given a Type"
+     when (isType e) $
+       pprTrace "exprTypeT: " (text "given a Type:" <+> ppr e) (error "exprTypeT")
      return (exprType' e)
 
 -- TODO: redefine exprTypeT via HERMIT's more exprTypeM
@@ -564,6 +568,10 @@ mkEither :: TransformU (Binop Type)
 mkEither = tcFind2 (eitherName "Either")
 
 type InCoreTC t = Injection t LCoreTC
+
+onScrutineeR :: (Monad m, ReadCrumb c, ExtendCrumb c, AddBindings c) =>
+                Unop (Rewrite c m CoreExpr)
+onScrutineeR r = caseAllR r id id (const id)
 
 -- Whether we're observing rewrites
 type Observing = Bool
