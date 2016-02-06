@@ -53,12 +53,12 @@ module HERMIT.Extras
   , mkUnit, mkPair, mkLeft, mkRight, mkEither
   , InCoreTC
   , onScrutineeR
-  , Observing, observeR', orL, scopeR, labeled
+  , Observing, observeR', catchesL, scopeR, labeled
              , bracketR', labeled'  -- To replace labeled
   , lintExprR -- , lintExprDieR
   , lintingExprR
   , varLitE, uqVarName, fqVarName, typeEtaLong, simplifyE
-  , walkE , alltdE, anytdE, anybuE, onetdE, onebuE
+  , walkE , alltdE, anytdE, anybuE, onetdE, onebuE, prunetdE
   , inAppTys, isAppTy, inlineWorkerR, unfoldWorkerR
   , letFloatToProg
   , concatProgs
@@ -583,9 +583,10 @@ observeR' False = const idR
 
 -- TODO: use kure's orR?
 
-orL :: (ReadBindings c, ReadCrumb c, LemmaContext c, InCoreTC t) =>
-       Observing -> [(String,RewriteM c t)] -> RewriteM c t
-orL observing = orR . map (labeled observing)
+-- | 'catchesT' on possibly-labeled rewrites
+catchesL :: (ReadBindings c, ReadCrumb c, LemmaContext c, InCoreTC t) =>
+            Observing -> [(String,RewriteM c t)] -> RewriteM c t
+catchesL observing = catchesM . map (labeled observing)
 
 -- scopeR :: InCoreTC a => String -> Unop (RewriteM c a)
 scopeR :: String -> Unop (TransformM c a b)
@@ -696,12 +697,13 @@ simplifyE = extractR simplifyR
 walkE :: Unop ReCore -> Unop ReExpr
 walkE trav r = extractR (trav (promoteR r :: ReCore))
 
-alltdE, anytdE, anybuE, onetdE, onebuE :: Unop ReExpr
-alltdE = walkE alltdR
-anytdE = walkE anytdR
-anybuE = walkE anybuR
-onetdE = walkE onetdR
-onebuE = walkE onebuR
+alltdE, anytdE, anybuE, onetdE, onebuE, prunetdE :: Unop ReExpr
+alltdE   = walkE alltdR
+anytdE   = walkE anytdR
+anybuE   = walkE anybuR
+onetdE   = walkE onetdR
+onebuE   = walkE onebuR
+prunetdE = walkE prunetdR
 
 -- TODO: Try rewriting more gracefully, testing isForAllTy first and
 -- maybeEtaExpandR
@@ -1045,7 +1047,12 @@ buildDictionaryT' :: TransformH Type CoreExpr
 buildDictionaryT' =
  {- observeR "buildDictionaryT' (pre)" >>> -}
    ( setFailMsgM (("Couldn't build dictionary for "++) <$> showPprT ) $
-       tryR bashE . {- scopeR "buildDictionaryT" -} buildDictionaryT )
+       tryR bashE
+     . lintExprR  -- temporary, https://github.com/ku-fpg/hermit/issues/170
+     . {- scopeR "buildDictionaryT" -} buildDictionaryT )
+
+-- The lintExprR addresses what I assume is a bug in buildDictionaryT, probably
+-- with free type variables. To do: investigate.
 
 -- buildDictionaryT' = setFailMsg "Couldn't build dictionary" $
 --                     tryR bashE . buildDictionaryT
