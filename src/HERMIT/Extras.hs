@@ -44,7 +44,7 @@ module HERMIT.Extras
   , exprAsConApp
     -- * HERMIT utilities
   , moduledName
-  , newIdT
+  , newIdT, newGlobalIdT
   , liftedKind, unliftedKind
   , ReType, ReExpr, ReBind, ReAlt, ReProg, ReCore, ReLCore,ReGuts
   , FilterH, FilterE, FilterTy, OkCM, TransformU
@@ -63,7 +63,7 @@ module HERMIT.Extras
   , letFloatToProg
   , concatProgs
   , rejectR , rejectTypeR
-  , simplifyExprR, changedSynR, changedArrR
+  , simplifyExprAlwaysR, simplifyExprR, changedSynR, changedArrR
   , showPprT, stashLabel, tweakLabel
 {-
   , saveDefT, findDefT
@@ -138,7 +138,7 @@ import HERMIT.Core
   , progSyntaxEq,bindSyntaxEq,defSyntaxEq,exprSyntaxEq
   , altSyntaxEq,typeSyntaxEq,coercionSyntaxEq
   , CoreDef(..),defToIdExpr, coercionAlphaEq,localFreeVarsExpr)
-import HERMIT.Name (newIdH,mkQualified)
+import HERMIT.Name (newIdH,newGlobalIdH,mkQualified)
 import HERMIT.Monad
   (HermitM,HasHermitMEnv,HasLemmas,getModGuts,LiftCoreM,getHscEnv)
 import HERMIT.Context
@@ -444,6 +444,10 @@ exprAsConApp e = exprIsConApp_maybe (in_scope, idUnfolding) e
 newIdT :: MonadUnique m => String -> Transform c m Type Id
 newIdT nm = do ty <- id
                constT (newIdH nm ty)
+
+newGlobalIdT :: MonadUnique m => String -> Transform c m Type Id
+newGlobalIdT nm = do ty <- id
+                     constT (newGlobalIdH nm ty)
 
 -- Common context & monad constraints
 -- type OkCM c m =
@@ -765,8 +769,12 @@ changedArrR = changedSynR . arr
 -- | Use GHC expression simplifier and succeed if different. Sadly, the check
 -- gives false positives, which spoils its usefulness.
 simplifyExprR :: ReExpr
-simplifyExprR = changedSynR $
-  prefixFailMsg "simplify-expr failed: " $
+simplifyExprR = changedSynR simplifyExprAlwaysR
+
+-- | Like 'simplifyExprR' but always succeeds (cheaper than 'tryR' 'simplifyExpr')
+simplifyExprAlwaysR :: ReExpr
+simplifyExprAlwaysR =
+  prefixFailMsg "simplifyExpr failed: " $
     contextfreeT $ \ e ->
       do dflags <- getDynFlags
          liftIO $ simplifyExpr dflags e
