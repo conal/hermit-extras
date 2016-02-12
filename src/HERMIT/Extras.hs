@@ -49,7 +49,7 @@ module HERMIT.Extras
   , ReType, ReExpr, ReBind, ReAlt, ReProg, ReCore, ReLCore,ReGuts
   , FilterH, FilterE, FilterTy, OkCM, TransformU
   , findTyConT, tyConApp1T
-  , isTypeE, isCastE, isDictE, isCoercionE
+  , isTypeE, isCastE, isDict, isDictE, isCoercionE
   , mkUnit, mkPair, mkLeft, mkRight, mkEither
   , InCoreTC
   , onScrutineeR
@@ -1028,8 +1028,14 @@ isCastE :: FilterE
 isCastE = castT id id mempty
 
 -- | Is the expression a dictionary?
+isDict :: CoreExpr -> Bool
+isDict e = not (isTypeArg e) && isDictTy (exprType' e)
+
+-- | Is the expression a dictionary?
 isDictE :: FilterE
-isDictE = guardT . (isDictTy <$> exprTypeT)
+isDictE = guardMsgM (arr isDict) "Not a dictionary"
+-- isDictE = guardT . (isDictTy <$> exprTypeT)
+-- isDictE = acceptWithFailMsgR isDict "Not a dictionary"
 
 -- | Is the expression a coercion?
 isCoercionE :: FilterE
