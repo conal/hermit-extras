@@ -38,9 +38,7 @@ module HERMIT.Extras
   , collectForalls, subst, isTyLam, setNominalRole_maybe
   , isVarT, isLitT, detickE, isWorker, isWorkerT
   , repr
-{-
-  , varOccCount, oneOccT, castOccsSame
--}
+  , varOccCount -- , oneOccT, castOccsSame
   , exprAsConApp
     -- * HERMIT utilities
   , moduledName
@@ -315,9 +313,7 @@ isLitT = litT successT
 repr :: Role
 repr = Representational
 
-#if __GLASGOW_HASKELL__ < 709
-
--- | Number of occurrences of a non-type variable
+-- | Number of occurrences of a non-type variable. Assumes no shadowing.
 varOccCount :: Var -> CoreExpr -> Int
 varOccCount v = occs
  where
@@ -336,6 +332,8 @@ varOccCount v = occs
    altOccs (_,_,e)          = occs e
    bindOccs (NonRec _ e)    = occs e
    bindOccs (Rec bs)        = sum (map (occs . snd) bs)
+
+#if __GLASGOW_HASKELL__ < 709
 
 -- TODO: stricter version
 
@@ -674,7 +672,10 @@ lintingExprR msg rr =
 -- mkVarName = contextfreeT (mkStringExpr . uqName . varName) &&& arr varType
 
 varLitE :: Var -> CoreExpr
-varLitE = Lit . mkMachString . uqVarName
+varLitE = Lit . mkMachString . uniqueName -- uqVarName
+
+uniqueName :: Var -> String
+uniqueName (varName -> nm) = unqualifiedName nm ++ show (nameUnique nm)
 
 uqVarName :: Var -> String
 uqVarName = unqualifiedName . varName
@@ -699,7 +700,7 @@ simplifyE :: ReExpr
 simplifyE = extractR simplifyR
 
 walkE :: Unop ReCore -> Unop ReExpr
-walkE trav r = extractR (trav (promoteR r :: ReCore))
+walkE trav r = extractR (trav (promoteR r))
 
 alltdE, anytdE, anybuE, onetdE, onebuE, prunetdE :: Unop ReExpr
 alltdE   = walkE alltdR
