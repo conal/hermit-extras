@@ -1030,7 +1030,7 @@ isCastE = castT id id mempty
 
 -- | Is the expression a dictionary?
 isDict :: CoreExpr -> Bool
-isDict e = not (isTypeArg e) && isDictTy (exprType' e)
+isDict e = not (isTypeArg e) && isDictLikeTy (exprType' e)
 
 -- | Is the expression a dictionary?
 isDictE :: FilterE
