@@ -50,7 +50,7 @@ module HERMIT.Extras
   , isTypeE, isCastE, isDict, isDictE, isCoercionE
   , mkUnit, mkPair, mkLeft, mkRight, mkEither
   , InCoreTC
-  , onScrutineeR
+  , onCaseExprR, onCastExprR
   , Observing, observeR', catchesL, scopeR, labeled
              , bracketR', labeled'  -- To replace labeled
   , lintExprR -- , lintExprDieR
@@ -571,9 +571,13 @@ mkEither = tcFind2 (eitherName "Either")
 
 type InCoreTC t = Injection t LCoreTC
 
-onScrutineeR :: (Monad m, ReadCrumb c, ExtendCrumb c, AddBindings c) =>
-                Unop (Rewrite c m CoreExpr)
-onScrutineeR r = caseAllR r id id (const id)
+onCaseExprR :: (Monad m, ReadCrumb c, ExtendCrumb c, AddBindings c) =>
+               Unop (Rewrite c m CoreExpr)
+onCaseExprR r = caseAllR r id id (const id)
+
+onCastExprR :: (Monad m, ReadCrumb c, ExtendCrumb c, AddBindings c) =>
+             Unop (Rewrite c m CoreExpr)
+onCastExprR r = castAllR r id
 
 -- Whether we're observing rewrites
 type Observing = Bool
